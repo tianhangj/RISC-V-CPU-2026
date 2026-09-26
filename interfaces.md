@@ -217,7 +217,7 @@ flowchart LR
 
 ### 4.1 公共端口
 
-除纯组合 `decode` 外，所有模块有输入 `clock:1, reset:1`；高电平同步复位。所有有状态模块再接下表控制端口；`branch_ctrl` 是控制输出端，其他模块是输入端。
+除纯组合 `decode` 外，所有模块有输入 `clock:1, reset:1`；高电平同步复位。参与恢复的流水模块接下表控制端口；`branch_ctrl` 产生这些控制，PRF 仅保留时钟、复位和读写端口，顶层不额外暴露恢复端口。完整声明见第 17 节。
 
 | 端口 | 方向（相对受控模块） | 位宽 | 语义 |
 |---|---|---:|---|
@@ -227,7 +227,7 @@ flowchart LR
 | `restart_pc` | 输入，仅 fetch | 32 | restore 当拍有效，指定恢复后取指 PC |
 | `flush_done` | 输出 | 1 | kill 后无旧事务/请求/结果残留，电平保持至 restore/reset |
 
-`prf` 不参与排空确认；其正常写使能受统一 WB 事件控制。`decode` 没有状态，不提供确认。其他模块的 `flush_done` 均必须进入控制器汇总；不能遗漏 Fetch 的取指请求或 LSU 的完成缓冲。
+`prf` 不参与排空确认；其正常写使能受统一 WB 事件控制。`decode` 没有状态，不提供确认。第 17.18 节列出的所有参与模块的 `flush_done` 均必须进入控制器汇总；控制器自身和顶层不产生额外确认，不能遗漏 Fetch 的取指请求或 LSU 的完成缓冲。
 
 ### 4.2 三种连接协议
 
@@ -336,7 +336,7 @@ I/S/B/J 立即数符号扩展到 32 位；U 为 `inst[31:12] << 12`。I=`inst[31
 
 | 生产者 → 消费者 | 信号 | 宽度/类型 |
 |---|---|---|
-| Rename → ROB/IQ/LSU | `disp_valid` | 1，已锁定一个派遣包 |
+| Rename → 顶层容量判定 | `disp_valid` | 1，已锁定一个派遣包 |
 | 组合容量判定 → Rename | `disp_ready` | 1，所有资源足以接收该包且 run=1 |
 | Rename → ROB/IQ/LSU | `disp_count` | `CNT(D)` |
 | Rename → ROB/IQ/LSU | `disp_uop[D]` | `renamed_uop_t` |
@@ -695,3 +695,893 @@ AW 在 t 握手、W 在 t+3 握手：t+1 起 awvalid 清零，wvalid/data/strb �
 测试文件只进入独立 tb filelist，不进入生产 `verilog/filelist.f`。本版无缓存，无需新增 SRAM 实例或更改框架脚本。后续如使用 sram_fakeram，遵守同步单端口模型，不能假定未定义输出可保持或宏可全局复位。
 
 本文完成标准：每条连接有生产者/消费者、类型、握手和恢复规则；没有待定架构选项；类型编码唯一；所有端口容量可在合法参数下表示；读响应、Store 成功与退休三种事件不混淆。工具链与官方测试尚未初始化/运行时应据实标注，不写“已通过”或固定未核实的测试数量。
+
+## 17. SystemVerilog 2005 模块端口声明
+
+### 17.1 语法、位宽与复制规则
+
+以下 15 份声明是接口骨架，不含可运行 CPU 行为。各代码块可独立保存为同名 `.sv`，无须依赖 package、宏或其他模块才能解析；本次仅在文档中给出，不加入生产 filelist。
+
+- 使用 IEEE SystemVerilog 2005 对应的 ANSI 端口形式、`parameter integer`、`input/output logic`、`$clog2` 与一维 packed 向量。
+- 不使用 `interface/modport`、结构体端口、类型参数、非打包数组端口或隐含通配连接。
+- 宽度为 1 的控制向量也保留 `[N-1:0]` 形式；载荷按第 2/3 节布局，lane k 用 `[k*BITS +: BITS]` 访问，lane 0 最低。
+- 每个模块显式声明所需架构参数及派生位宽。位宽参数只为 ANSI 端口提供常量，**禁止调用者独立覆盖**；顶层仅将同名架构参数传给需要它的实例。
+- `RESET_PC` 为 32 位参数；`XLEN` 固定 32，覆盖为其他值是非法配置。端口内的常量 32 因此不是可调数据宽度。
+- 有些深度参数只用于公共载荷布局。例如 ALU 也需要 LQ/SQ 深度来解释 `exec_req_t`，不代表 ALU 内部包含队列。
+
+公共位宽公式如下，默认值以第 2 节配置为准；`PW/RTW/LIDW/SIDW/TIDW` 的定义不变。
+
+| 常量 | 逻辑类型/用途 | 公式 | 默认位数 |
+|---|---|---|---:|
+| `FAULT_BITS` | fault_t | 4+32+32 | 68 |
+| `FETCH_BITS` | fetch_packet_t | 96+FAULT_BITS | 164 |
+| `DECODE_BITS` | decoded_uop_t | FETCH_BITS+68 | 232 |
+| `RENAME_BITS` | renamed_uop_t | DECODE_BITS+RTW+4*PW+2+LIDW+SIDW | 270 |
+| `EXEC_BITS` | exec_req_t | RENAME_BITS+64 | 334 |
+| `CPL_BITS` | completion_t | RTW+1+PW+32+FAULT_BITS+1+32 | 146 |
+| `COMMIT_BITS` | commit_event_t | RTW+2*PW+LIDW+SIDW+73 | 97 |
+| `REDIRECT_BITS` | redirect_t | 2+32 | 34 |
+| `RD_REQ_BITS` | mem_read_req_t | TIDW+32 | 36 |
+| `RD_RSP_BITS` | mem_read_rsp_t | TIDW+32+2 | 38 |
+| `WR_REQ_BITS` | mem_write_req_t | SIDW+32+32+4 | 71 |
+| `WR_RSP_BITS` | mem_write_rsp_t | SIDW+2 | 5 |
+| `ST_COMMIT_BITS` | store_commit_req_t | RTW+SIDW | 9 |
+| `ST_DONE_BITS` | store_commit_rsp_t | RTW+SIDW+FAULT_BITS | 77 |
+
+`AIQW/MIQW` 分别是两个 IQ 的槽索引宽度。`DCW/ROB_CW/AIQ_CW/MIQ_CW/LQ_CW/SQ_CW` 均为对应容量的 CNT，不是 IDX。它们的定义在需要的模块中完整给出；`RTW` 是 rob_tag_t 的完整位宽。
+
+### 17.2 `student_top`
+
+外部接口与框架一致；内部 debug 信号不增加为必需顶层端口。
+
+```systemverilog
+module student_top #(
+    parameter integer XLEN = 32,
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer IQ_ALU_DEPTH = 16,
+    parameter integer IQ_MEM_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer IFETCH_OUTSTANDING = 8,
+    parameter integer LOAD_OUTSTANDING = 8,
+    parameter integer AXI_RD_OUTSTANDING = 16,
+    parameter [31:0] RESET_PC = 32'h00000000
+) (
+    // 时钟与复位
+    input logic clock,
+    input logic reset,
+    // AXI4-Lite 主接口
+    output logic [32-1:0] araddr,
+    output logic arvalid,
+    input logic arready,
+    input logic [32-1:0] rdata,
+    input logic [2-1:0] rresp,
+    input logic rvalid,
+    output logic rready,
+    output logic [32-1:0] awaddr,
+    output logic awvalid,
+    input logic awready,
+    output logic [32-1:0] wdata,
+    output logic [4-1:0] wstrb,
+    output logic wvalid,
+    input logic wready,
+    input logic [2-1:0] bresp,
+    input logic bvalid,
+    output logic bready
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.3 `fetch`
+
+已接受请求在 kill 后仍须接收并丢弃响应。
+
+```systemverilog
+module fetch #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer IFETCH_OUTSTANDING = 8,
+    parameter [31:0] RESET_PC = 32'h00000000,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
+    parameter integer TIDW = (FIDW > LIDW) ? FIDW : LIDW,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer RD_REQ_BITS = TIDW + 32,
+    parameter integer RD_RSP_BITS = TIDW + 32 + 2
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    input logic [32-1:0] restart_pc,
+    // 直接取指读请求/响应
+    output logic if_req_valid,
+    input logic if_req_ready,
+    output logic [RD_REQ_BITS-1:0] if_req_payload, // mem_read_req_t
+    input logic if_rsp_valid,
+    output logic if_rsp_ready,
+    input logic [RD_RSP_BITS-1:0] if_rsp_payload, // mem_read_rsp_t
+    // 到 Decode 的整包通道
+    output logic fetch_valid,
+    input logic fetch_ready,
+    output logic [DCW-1:0] fetch_count,
+    output logic [DISPATCH_WIDTH*FETCH_BITS-1:0] fetch_packet // fetch_packet_t × D
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.4 `decode`
+
+纯组合模块；没有 clock/reset，也没有恢复确认。
+
+```systemverilog
+module decode #(
+    parameter integer DISPATCH_WIDTH = 2,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68
+) (
+    // 来自 Fetch
+    input logic fetch_valid,
+    output logic fetch_ready,
+    input logic [DCW-1:0] fetch_count,
+    input logic [DISPATCH_WIDTH*FETCH_BITS-1:0] fetch_packet, // fetch_packet_t × D
+    // 到 Rename
+    output logic decode_valid,
+    input logic decode_ready,
+    output logic [DCW-1:0] decode_count,
+    output logic [DISPATCH_WIDTH*DECODE_BITS-1:0] decode_uop // decoded_uop_t × D
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.5 `rename`
+
+disp_ready 由顶层容量判定产生；内部更新条件等于顶层 disp_fire。
+
+```systemverilog
+module rename #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer IQ_ALU_DEPTH = 16,
+    parameter integer IQ_MEM_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer ROB_CW = (ROB_DEPTH > 0) ? $clog2(ROB_DEPTH + 1) : 1,
+    parameter integer AIQ_CW = (IQ_ALU_DEPTH > 0) ? $clog2(IQ_ALU_DEPTH + 1) : 1,
+    parameter integer MIQ_CW = (IQ_MEM_DEPTH > 0) ? $clog2(IQ_MEM_DEPTH + 1) : 1,
+    parameter integer LQ_CW = (LQ_DEPTH > 0) ? $clog2(LQ_DEPTH + 1) : 1,
+    parameter integer SQ_CW = (SQ_DEPTH > 0) ? $clog2(SQ_DEPTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32,
+    parameter integer COMMIT_BITS = RTW + 2*PW + LIDW + SIDW + 73
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // 来自 Decode
+    input logic decode_valid,
+    output logic decode_ready,
+    input logic [DCW-1:0] decode_count,
+    input logic [DISPATCH_WIDTH*DECODE_BITS-1:0] decode_uop, // decoded_uop_t × D
+    // 容量与分配预览
+    input logic [ROB_CW-1:0] rob_free,
+    input logic [DISPATCH_WIDTH*RTW-1:0] rob_alloc_tag, // rob_tag_t × D
+    input logic [AIQ_CW-1:0] alu_iq_free,
+    input logic [MIQ_CW-1:0] mem_iq_free,
+    input logic [LQ_CW-1:0] lq_free,
+    input logic [SQ_CW-1:0] sq_free,
+    input logic [DISPATCH_WIDTH*LIDW-1:0] lq_alloc_id,
+    input logic [DISPATCH_WIDTH*SIDW-1:0] sq_alloc_id,
+    // 派遣 offer 与实时源就绪侧带
+    output logic disp_valid,
+    input logic disp_ready,
+    output logic [DCW-1:0] disp_count,
+    output logic [DISPATCH_WIDTH*RENAME_BITS-1:0] disp_uop, // renamed_uop_t × D
+    output logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
+    output logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    // 完成与退休广播输入
+    input logic [WB_WIDTH-1:0] wb_valid,
+    input logic [WB_WIDTH*CPL_BITS-1:0] wb_payload, // completion_t × W
+    input logic [COMMIT_WIDTH-1:0] commit_valid,
+    input logic [COMMIT_WIDTH*COMMIT_BITS-1:0] commit_payload // commit_event_t × C
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.6 `prf`
+
+无恢复端口；仅 wr_en 控制写入，已提交数据在恢复时保留。
+
+```systemverilog
+module prf #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer PRF_SIZE = 64,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1
+) (
+    // 时钟与复位
+    input logic clock,
+    input logic reset,
+    // 组合读；口 2k/2k+1 对应选择序号 k
+    input logic [2*ISSUE_WIDTH*PW-1:0] rd_addr,
+    output logic [2*ISSUE_WIDTH*32-1:0] rd_data,
+    // 同步写；由 WB 字段拆出
+    input logic [WB_WIDTH-1:0] wr_en,
+    input logic [WB_WIDTH*PW-1:0] wr_addr,
+    input logic [WB_WIDTH*32-1:0] wr_data
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.7 `rob`
+
+接收原子分配与完成广播，产生退休事件及一次性 Store 授权。
+
+```systemverilog
+module rob #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer ROB_CW = (ROB_DEPTH > 0) ? $clog2(ROB_DEPTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32,
+    parameter integer COMMIT_BITS = RTW + 2*PW + LIDW + SIDW + 73,
+    parameter integer REDIRECT_BITS = 2 + 32,
+    parameter integer ST_COMMIT_BITS = RTW + SIDW,
+    parameter integer ST_DONE_BITS = RTW + SIDW + FAULT_BITS
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // 原子派遣输入
+    input logic disp_fire,
+    input logic [DCW-1:0] disp_count,
+    input logic [DISPATCH_WIDTH*RENAME_BITS-1:0] disp_uop, // renamed_uop_t × D
+    // 完成输入
+    input logic [WB_WIDTH-1:0] wb_valid,
+    input logic [WB_WIDTH*CPL_BITS-1:0] wb_payload, // completion_t × W
+    // 容量、标签与年龄基准
+    output logic [ROB_CW-1:0] rob_free,
+    output logic [DISPATCH_WIDTH*RTW-1:0] rob_alloc_tag,
+    output logic [RTW-1:0] rob_head_tag, // rob_tag_t
+    // 退休输出
+    output logic [COMMIT_WIDTH-1:0] commit_valid,
+    output logic [COMMIT_WIDTH*COMMIT_BITS-1:0] commit_payload, // commit_event_t × C
+    // Store 授权/完成
+    output logic st_commit_valid,
+    input logic st_commit_ready,
+    output logic [ST_COMMIT_BITS-1:0] st_commit_payload, // store_commit_req_t
+    input logic st_done_valid,
+    output logic st_done_ready,
+    input logic [ST_DONE_BITS-1:0] st_done_payload, // store_commit_rsp_t
+    // 恢复与故障事件；无 ready
+    output logic recover_valid,
+    output logic [REDIRECT_BITS-1:0] recover_payload, // redirect_t
+    output logic fault_valid,
+    output logic [FAULT_BITS-1:0] fault_payload // fault_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.8 `branch_ctrl`
+
+自身不提供 flush_done；仅汇总第 17.18 节指定的参与模块。
+
+```systemverilog
+module branch_ctrl #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter [31:0] RESET_PC = 32'h00000000,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer FLUSH_COUNT = ISSUE_WIDTH + 10,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer REDIRECT_BITS = 2 + 32
+) (
+    // 时钟与复位
+    input logic clock,
+    input logic reset,
+    // ROB 事件输入
+    input logic recover_valid,
+    input logic [REDIRECT_BITS-1:0] recover_payload, // redirect_t
+    input logic fault_valid,
+    input logic [FAULT_BITS-1:0] fault_payload, // fault_t
+    // 参与模块确认
+    input logic [FLUSH_COUNT-1:0] flush_done_vec,
+    // 控制广播输出
+    output logic run,
+    output logic kill,
+    output logic restore,
+    output logic [32-1:0] restart_pc,
+    // 保持型内部调试状态；无 ready
+    output logic faulted,
+    output logic [FAULT_BITS-1:0] fault_info // fault_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.9 `iq_alu`
+
+cand_* 是可变化的候选预览，只有 cand_take 才取走相应项。
+
+```systemverilog
+module iq_alu #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer IQ_ALU_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer AIQW = (IQ_ALU_DEPTH > 1) ? $clog2(IQ_ALU_DEPTH) : 1,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer AIQ_CW = (IQ_ALU_DEPTH > 0) ? $clog2(IQ_ALU_DEPTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32
+) (
+    // 控制与年龄
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    input logic [RTW-1:0] rob_head_tag, // rob_tag_t
+    // 原子派遣及实时源就绪
+    input logic disp_fire,
+    input logic [DCW-1:0] disp_count,
+    input logic [DISPATCH_WIDTH*RENAME_BITS-1:0] disp_uop, // renamed_uop_t × D
+    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
+    input logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    // 完成唤醒
+    input logic [WB_WIDTH-1:0] wb_valid,
+    input logic [WB_WIDTH*CPL_BITS-1:0] wb_payload, // completion_t × W
+    // 容量和候选输出
+    output logic [AIQ_CW-1:0] alu_iq_free,
+    output logic [ISSUE_WIDTH-1:0] cand_valid,
+    output logic [ISSUE_WIDTH*AIQW-1:0] cand_slot,
+    output logic [ISSUE_WIDTH*RENAME_BITS-1:0] cand_uop, // 候选 renamed_uop_t × I；非 RV
+    input logic [ISSUE_WIDTH-1:0] cand_take
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.10 `iq_mem`
+
+cand_* 是可变化的候选预览，只有 cand_take 才取走相应项。
+
+```systemverilog
+module iq_mem #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer IQ_MEM_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer MIQW = (IQ_MEM_DEPTH > 1) ? $clog2(IQ_MEM_DEPTH) : 1,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer MIQ_CW = (IQ_MEM_DEPTH > 0) ? $clog2(IQ_MEM_DEPTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32
+) (
+    // 控制与年龄
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    input logic [RTW-1:0] rob_head_tag, // rob_tag_t
+    // 原子派遣及实时源就绪
+    input logic disp_fire,
+    input logic [DCW-1:0] disp_count,
+    input logic [DISPATCH_WIDTH*RENAME_BITS-1:0] disp_uop, // renamed_uop_t × D
+    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
+    input logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    // 完成唤醒
+    input logic [WB_WIDTH-1:0] wb_valid,
+    input logic [WB_WIDTH*CPL_BITS-1:0] wb_payload, // completion_t × W
+    // 容量和候选输出
+    output logic [MIQ_CW-1:0] mem_iq_free,
+    output logic [ISSUE_WIDTH-1:0] cand_valid,
+    output logic [ISSUE_WIDTH*MIQW-1:0] cand_slot,
+    output logic [ISSUE_WIDTH*RENAME_BITS-1:0] cand_uop, // 候选 renamed_uop_t × I；非 RV
+    input logic [ISSUE_WIDTH-1:0] cand_take
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.11 `issue_sched`
+
+合计最多取走 ISSUE_WIDTH 个候选；执行入口为保持型通道。
+
+```systemverilog
+module issue_sched #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer IQ_ALU_DEPTH = 16,
+    parameter integer IQ_MEM_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer AIQW = (IQ_ALU_DEPTH > 1) ? $clog2(IQ_ALU_DEPTH) : 1,
+    parameter integer MIQW = (IQ_MEM_DEPTH > 1) ? $clog2(IQ_MEM_DEPTH) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer EXEC_BITS = RENAME_BITS + 64
+) (
+    // 控制与年龄
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    input logic [RTW-1:0] rob_head_tag, // rob_tag_t
+    // ALU IQ 候选
+    input logic [ISSUE_WIDTH-1:0] alu_cand_valid,
+    input logic [ISSUE_WIDTH*AIQW-1:0] alu_cand_slot,
+    input logic [ISSUE_WIDTH*RENAME_BITS-1:0] alu_cand_uop, // 候选 renamed_uop_t × I；非 RV
+    output logic [ISSUE_WIDTH-1:0] alu_cand_take,
+    // MEM IQ 候选
+    input logic [ISSUE_WIDTH-1:0] mem_cand_valid,
+    input logic [ISSUE_WIDTH*MIQW-1:0] mem_cand_slot,
+    input logic [ISSUE_WIDTH*RENAME_BITS-1:0] mem_cand_uop, // 候选 renamed_uop_t × I；非 RV
+    output logic [ISSUE_WIDTH-1:0] mem_cand_take,
+    // PRF 组合读
+    output logic [2*ISSUE_WIDTH*PW-1:0] rd_addr,
+    input logic [2*ISSUE_WIDTH*32-1:0] rd_data,
+    // 各 ALU 入口，独立握手
+    output logic [ISSUE_WIDTH-1:0] alu_exec_valid,
+    input logic [ISSUE_WIDTH-1:0] alu_exec_ready,
+    output logic [ISSUE_WIDTH*EXEC_BITS-1:0] alu_exec_payload, // exec_req_t × I
+    // 单个乘除入口
+    output logic mul_exec_valid,
+    input logic mul_exec_ready,
+    output logic [EXEC_BITS-1:0] mul_exec_payload, // exec_req_t
+    // 单个 LSU/AGU 入口
+    output logic mem_exec_valid,
+    input logic mem_exec_ready,
+    output logic [EXEC_BITS-1:0] mem_exec_payload // exec_req_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.12 `alu`
+
+单实例端口；ALU 由顶层复制 I 份，mul_div 仅一份。
+
+```systemverilog
+module alu #(
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer EXEC_BITS = RENAME_BITS + 64,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // 执行输入
+    input logic exec_valid,
+    output logic exec_ready,
+    input logic [EXEC_BITS-1:0] exec_payload, // exec_req_t
+    // 完成输出
+    output logic result_valid,
+    input logic result_ready,
+    output logic [CPL_BITS-1:0] result_payload // completion_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.13 `mul_div`
+
+单实例端口；ALU 由顶层复制 I 份，mul_div 仅一份。
+
+```systemverilog
+module mul_div #(
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer EXEC_BITS = RENAME_BITS + 64,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // 执行输入
+    input logic exec_valid,
+    output logic exec_ready,
+    input logic [EXEC_BITS-1:0] exec_payload, // exec_req_t
+    // 完成输出
+    output logic result_valid,
+    input logic result_ready,
+    output logic [CPL_BITS-1:0] result_payload // completion_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.14 `wb_arb`
+
+结果源 lane 0..I-1 为 ALU，I 为 MULDIV，I+1 为 LSU。
+
+```systemverilog
+module wb_arb #(
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer WB_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer FU_SRC_COUNT = ISSUE_WIDTH + 2,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // 独立结果输入
+    input logic [FU_SRC_COUNT-1:0] result_valid,
+    output logic [FU_SRC_COUNT-1:0] result_ready,
+    input logic [FU_SRC_COUNT*CPL_BITS-1:0] result_payload, // completion_t × (I+2)
+    // 统一完成广播
+    output logic [WB_WIDTH-1:0] wb_valid,
+    output logic [WB_WIDTH*CPL_BITS-1:0] wb_payload // completion_t × W
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.15 `lsu`
+
+内含 AGU、LQ/SQ 与完成缓冲；执行完成不等于 Store 外部完成。
+
+```systemverilog
+module lsu #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer LOAD_OUTSTANDING = 8,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
+    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
+    parameter integer RTW = RW + 1,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
+    parameter integer TIDW = (FIDW > LIDW) ? FIDW : LIDW,
+    parameter integer DCW = (DISPATCH_WIDTH > 0) ? $clog2(DISPATCH_WIDTH + 1) : 1,
+    parameter integer LQ_CW = (LQ_DEPTH > 0) ? $clog2(LQ_DEPTH + 1) : 1,
+    parameter integer SQ_CW = (SQ_DEPTH > 0) ? $clog2(SQ_DEPTH + 1) : 1,
+    parameter integer FAULT_BITS = 4 + 32 + 32,
+    parameter integer FETCH_BITS = 32 + 32 + 32 + FAULT_BITS,
+    parameter integer DECODE_BITS = FETCH_BITS + 68,
+    parameter integer RENAME_BITS = DECODE_BITS + RTW + 4*PW + 2 + LIDW + SIDW,
+    parameter integer EXEC_BITS = RENAME_BITS + 64,
+    parameter integer CPL_BITS = RTW + 1 + PW + 32 + FAULT_BITS + 1 + 32,
+    parameter integer COMMIT_BITS = RTW + 2*PW + LIDW + SIDW + 73,
+    parameter integer RD_REQ_BITS = TIDW + 32,
+    parameter integer RD_RSP_BITS = TIDW + 32 + 2,
+    parameter integer WR_REQ_BITS = SIDW + 32 + 32 + 4,
+    parameter integer WR_RSP_BITS = SIDW + 2,
+    parameter integer ST_COMMIT_BITS = RTW + SIDW,
+    parameter integer ST_DONE_BITS = RTW + SIDW + FAULT_BITS
+) (
+    // 控制与年龄
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    input logic [RTW-1:0] rob_head_tag, // rob_tag_t
+    // 原子队列分配
+    input logic disp_fire,
+    input logic [DCW-1:0] disp_count,
+    input logic [DISPATCH_WIDTH*RENAME_BITS-1:0] disp_uop, // renamed_uop_t × D
+    // 容量与候选槽
+    output logic [LQ_CW-1:0] lq_free,
+    output logic [SQ_CW-1:0] sq_free,
+    output logic [DISPATCH_WIDTH*LIDW-1:0] lq_alloc_id,
+    output logic [DISPATCH_WIDTH*SIDW-1:0] sq_alloc_id,
+    // AGU 输入和完成输出
+    input logic exec_valid,
+    output logic exec_ready,
+    input logic [EXEC_BITS-1:0] exec_payload, // exec_req_t
+    output logic result_valid,
+    input logic result_ready,
+    output logic [CPL_BITS-1:0] result_payload, // completion_t
+    // 退休释放队列项
+    input logic [COMMIT_WIDTH-1:0] commit_valid,
+    input logic [COMMIT_WIDTH*COMMIT_BITS-1:0] commit_payload, // commit_event_t × C
+    // Store 授权与写完成回报
+    input logic st_commit_valid,
+    output logic st_commit_ready,
+    input logic [ST_COMMIT_BITS-1:0] st_commit_payload, // store_commit_req_t
+    output logic st_done_valid,
+    input logic st_done_ready,
+    output logic [ST_DONE_BITS-1:0] st_done_payload, // store_commit_rsp_t
+    // Load 到桥
+    output logic ld_req_valid,
+    input logic ld_req_ready,
+    output logic [RD_REQ_BITS-1:0] ld_req_payload, // mem_read_req_t
+    input logic ld_rsp_valid,
+    output logic ld_rsp_ready,
+    input logic [RD_RSP_BITS-1:0] ld_rsp_payload, // mem_read_rsp_t
+    // Store 到桥
+    output logic st_req_valid,
+    input logic st_req_ready,
+    output logic [WR_REQ_BITS-1:0] st_req_payload, // mem_write_req_t
+    input logic st_rsp_valid,
+    output logic st_rsp_ready,
+    input logic [WR_RSP_BITS-1:0] st_rsp_payload // mem_write_rsp_t
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+### 17.16 `axi_bridge`
+
+只处理客户端事务和 AXI 协议，不接收 ROB/WB/commit。
+
+```systemverilog
+module axi_bridge #(
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer AXI_RD_OUTSTANDING = 16,
+    // 派生位宽：禁止单独覆盖，仅修改上面的架构参数。
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
+    parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
+    parameter integer TIDW = (FIDW > LIDW) ? FIDW : LIDW,
+    parameter integer RD_REQ_BITS = TIDW + 32,
+    parameter integer RD_RSP_BITS = TIDW + 32 + 2,
+    parameter integer WR_REQ_BITS = SIDW + 32 + 32 + 4,
+    parameter integer WR_RSP_BITS = SIDW + 2
+) (
+    // 控制
+    input logic clock,
+    input logic reset,
+    input logic run,
+    input logic kill,
+    input logic restore,
+    output logic flush_done,
+    // Fetch 客户端
+    input logic if_req_valid,
+    output logic if_req_ready,
+    input logic [RD_REQ_BITS-1:0] if_req_payload, // mem_read_req_t
+    output logic if_rsp_valid,
+    input logic if_rsp_ready,
+    output logic [RD_RSP_BITS-1:0] if_rsp_payload, // mem_read_rsp_t
+    // Load 客户端
+    input logic ld_req_valid,
+    output logic ld_req_ready,
+    input logic [RD_REQ_BITS-1:0] ld_req_payload, // mem_read_req_t
+    output logic ld_rsp_valid,
+    input logic ld_rsp_ready,
+    output logic [RD_RSP_BITS-1:0] ld_rsp_payload, // mem_read_rsp_t
+    // Store 客户端
+    input logic st_req_valid,
+    output logic st_req_ready,
+    input logic [WR_REQ_BITS-1:0] st_req_payload, // mem_write_req_t
+    output logic st_rsp_valid,
+    input logic st_rsp_ready,
+    output logic [WR_RSP_BITS-1:0] st_rsp_payload, // mem_write_rsp_t
+    // 外部 AXI4-Lite 主接口
+    output logic [32-1:0] araddr,
+    output logic arvalid,
+    input logic arready,
+    input logic [32-1:0] rdata,
+    input logic [2-1:0] rresp,
+    input logic rvalid,
+    output logic rready,
+    output logic [32-1:0] awaddr,
+    output logic awvalid,
+    input logic awready,
+    output logic [32-1:0] wdata,
+    output logic [4-1:0] wstrb,
+    output logic wvalid,
+    input logic wready,
+    input logic [2-1:0] bresp,
+    input logic bvalid,
+    output logic bready
+);
+    // 仅端口声明；模块行为按本文对应章节实现。
+endmodule
+```
+
+
+### 17.17 顶层派遣、写回与执行连接
+
+本节是顶层连接规则，不为内部模块增加另一套握手。
+
+**原子派遣**：Rename 的 disp_valid 只送顶层仲裁，ROB/IQ/LSU 仅使用统一 disp_fire。顶层根据 offer 的前 disp_count 个 lane 分别统计 `need_alu/need_mem/need_lq/need_sq`；已知错误微操作按 fu=ALU 计数。判定：
+
+```text
+disp_ready = run && !kill
+          && rob_free >= disp_count
+          && alu_iq_free >= need_alu && mem_iq_free >= need_mem
+          && lq_free >= need_lq && sq_free >= need_sq
+disp_fire  = disp_valid && disp_ready && !kill
+```
+
+物理目的寄存器已由 Rename 在形成 offer 时检查、锁定候选，顶层不再访问其空闲表。Rename 自身使用同一 fire 表达式更新，不增加可能不一致的第二个 fire 输入。disp_uop/count 同送三个接收子系统，disp_src1_ready/disp_src2_ready 只送两个 IQ。各模块共享的参数必须相同，不能只改变其中一个模块的 PRF 或 LSQ 深度。
+
+**候选与执行**：IQ 的 `cand_*` 分别连接调度器的 `alu_cand_*` 和 `mem_cand_*`；take 反向连接。调度器 rd_addr 接 PRF，rd_data 返回调度器。`alu_exec_*` 第 k lane 接第 k 个 ALU 的 exec_*；mul_exec_* 接 mul_div，mem_exec_* 接 LSU。同一 lane 的 valid、ready 和载荷切片必须成组连接。
+
+**结果与广播**：wb_arb 的 result_* 第 k lane 接 ALU[k]，第 I lane 接 mul_div，第 I+1 lane 接 LSU；ready 反向连接。wb_valid/payload 广播至 ROB、Rename 和两个 IQ，不送 LSU 作为第二条完成确认；LSU 通过自己的 result 握手知道完成已接收。ROB 的 commit 广播接 Rename 和 LSU。
+
+**PRF 写口**：顶层从第 k 个 completion 切片 `cpl` 拆出写口。按照第 3 节的高到低布局，其低位为 actual_npc[31:0]、branch_valid、fault、value、pdst、rd_we、rob。因此：
+
+```text
+CPL_VALUE_LSB = 32 + 1 + FAULT_BITS
+CPL_PDST_LSB  = CPL_VALUE_LSB + 32
+CPL_RD_WE_BIT = CPL_PDST_LSB + PW
+wr_addr[k]   = cpl[CPL_PDST_LSB +: PW]
+wr_data[k]   = cpl[CPL_VALUE_LSB +: 32]
+wr_en[k]     = wb_valid[k] && cpl[CPL_RD_WE_BIT] && (wr_addr[k] != 0)
+```
+
+以上 k 是逻辑 lane；实际端口 wr_addr/wr_data 使用扁平切片赋值。代码实现中这些偏移应定义为 localparam，不能把默认配置下的 pdst/rd_we 位号硬编码。kill/drain 时 wb_arb 保证 wb_valid 为零。
+
+**访存与恢复**：Fetch 的 if_req/if_rsp 对接桥的同名端口；LSU 的 ld_req/ld_rsp、st_req/st_rsp 对接桥。ROB 的 st_commit/st_done 对接 LSU，不直接对接桥。rob_head_tag 广播至两个 IQ、调度器和 LSU。所有带 run/kill/restore 的实例由 branch_ctrl 的对应输出驱动；fetch.restart_pc 接控制器 restart_pc。
+
+### 17.18 恢复确认向量与控制端口例外
+
+`FLUSH_COUNT=ISSUE_WIDTH+10`，顶层按下表拼接 flush_done_vec。对应模块名只描述连线来源，不要求固定实例名称。
+
+| 位号 | 来源 |
+|---:|---|
+| 0 | fetch.flush_done |
+| 1 | rename.flush_done |
+| 2 | rob.flush_done |
+| 3 | iq_alu.flush_done |
+| 4 | iq_mem.flush_done |
+| 5 | issue_sched.flush_done |
+| 6 | mul_div.flush_done |
+| 7 | wb_arb.flush_done |
+| 8 | lsu.flush_done |
+| 9 | axi_bridge.flush_done |
+| 10+k，0≤k<I | ALU[k].flush_done |
+
+控制器仅在 DRAIN 状态采样 `&flush_done_vec`，不能漏接未使用但已实例化的执行单元确认。decode 无状态，不参与确认；PRF 只保留寄存器数据，不参与排空；branch_ctrl 不将自身纳入确认；student_top 不另增一个确认项。
+
+所有参与恢复的模块有 clock/reset/run/kill/restore 和 flush_done；这些不是要给每个模块机械添加的公共端口。特别是 PRF 没有 run/kill/restore，decode 没有 clock/reset，branch_ctrl 的 run/kill/restore 是输出。
+
+### 17.19 声明验证边界
+
+这些模块体故意为空，输出不会提供 CPU 功能；语法解析或参数展开成功不等于仿真程序通过。文档声明应通过 `iverilog -g2005-sv` 检查，并核对不同参数下的载荷位宽和连接双方宽度。仍须在实现模块行为后进行框架 Yosys 综合和第 16 节功能回归。
+
+本次文档更新的检查范围：15 个代码块分别独立解析；默认配置、I=1、I=4、W=1、(D,I,W,C)=(1,4,1,1)/(4,1,2,4)/(4,4,4,4)，以及 D/I/W/C 和队列容量为 1 的边界配置，共 8 组参数。全四宽配置同时改变 ROB/PRF/LQ/SQ/取指队列容量，边界配置保留 ROB_DEPTH=8、PRF_SIZE=33 并将未完成读上限降至 1，均满足第 2 节限制。检查还将公共类型公式与第 3 节字段逐项求和比较，并核对声明端口的方向、连接宽度和 lane 数。本次没有执行 Yosys 综合或 CPU 功能仿真。
