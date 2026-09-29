@@ -1,6 +1,6 @@
 # RV32IM 无缓存乱序核接口规范
 
-版本：v1.5。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.5.1。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
@@ -11,7 +11,7 @@
 - 分支误预测只 squash 更年轻状态，保留该分支及更老工作；Fetch 立即切换 PC，Rename 从分支 checkpoint 恢复。桥继续完成旧事务，并在剩余容量内接收新路径请求。
 - 接口只携带接收方消费的字段，不提供调试、退休轨迹、断言、额外诊断性一致性检查、超时、重试或配置检查电路。不要求验证基础设施。
 
-无缓存取指每拍最多取得一个 32 位指令字，与数据读取共享总线。错误路径可以占用内部资源和读取 RAM，但不能改变已提交寄存器、内存或外设状态，不能触发退出。队列满时背压，正确性不依赖错误路径长度或误预测次数的上限。未知编码转 NOP、非 RAM 读门控、身份匹配、generation 匹配、Store 授权和 squash 是这一功能要求的一部分。
+无缓存取指每拍最多取得一个 32 位指令字，与数据读取共享总线。错误路径可以占用内部资源和读取 RAM，但不能改变已提交寄存器、内存或外设状态，不能触发退出。队列满时背压；除第 12 节明确的 generation 不回绕假设外，正确性不依赖错误路径长度或误预测次数的上限。未知编码转 NOP、非 RAM 读门控、身份匹配、generation 匹配、Store 授权和 squash 是这一功能要求的一部分。
 
 | 模块 | 主责 | 职责 |
 |---|---|---|
@@ -45,11 +45,11 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 
 XLEN 固定 32，不作为参数。最多一笔未完成写。参数满足上表是集成前提，不增加参数合法性检查。
 
-定义 `IDX(N)=max(1,ceil(log2(N)))`、`CNT(N)=max(1,ceil(log2(N+1)))`。`RW=IDX(R)`、`PW=IDX(P)`、`LIDW=IDX(LQ_DEPTH)`、`SIDW=IDX(SQ_DEPTH)`、`FIDW=IDX(F)`、`MIDW=max(LIDW,SIDW)`、`GW=GEN_WIDTH`、`CIDW=IDX(K)`、`TAG_BITS=RW`（ROB tag 仅含 rob_id/index，不再携带 generation）。
+定义 `IDX(N)=max(1,ceil(log2(N)))`、`CNT(N)=max(1,ceil(log2(N+1)))`。`RW=IDX(R)`、`PW=IDX(P)`、`LIDW=IDX(LQ_DEPTH)`、`SIDW=IDX(SQ_DEPTH)`、`FIDW=IDX(F)`、`MIDW=max(LIDW,SIDW)`、`CIDW=IDX(K)`、`TAG_BITS=RW`（ROB tag 仅含 rob_id/index，不再携带 generation）。
 
 ROB 身份为 `rob_tag_t={index}`（仅 rob_id/index）。活跃项年龄为 `(index-head) mod R`。ROB 用占用计数区分满/空。generation 不进入 ROB 身份，也不用于判断后端指令失效。
 
-正常退休后的 ROB 槽、完成后的 LQ 槽可在下一拍复用；squash 后的槽也可在下一拍复用。旧读返回仍带原 generation，`{gen,id}` 不匹配的数据只归还事务额度、不写新槽。generation 单调递增，不回收复用；约定 16 位在任何旧读事务存活期间不回绕（见第 12 节）。
+正常退休后的 ROB 槽、完成后的 LQ 槽可在下一拍复用；squash 后的槽也可在下一拍复用。旧读返回仍带原 generation，`{gen,id}` 不匹配的数据只归还事务额度、不写新槽。generation 按模 `2^GEN_WIDTH` 自增，不显式回收；约定从任一读请求被桥接收到其响应返回期间不会发生回绕碰撞（见第 12 节）。
 
 CPU 内部在途请求、运算和结果的身份均由其活跃 ROB 项覆盖。被 squash 的内部工作在该边沿取消，不能在后续周期重新产生旧结果；已经有效的失效结果同拍取消或被 WB 接收丢弃。只有桥内已接受读可以在 ROB 项失效后继续存在，其 generation 由桥独立保持，用于 `{gen,id}` 匹配。这样编号回收不遗漏执行缓冲中的引用。
 
@@ -101,7 +101,7 @@ ROB 单独保存 2 位 `kind`：0=普通，1=控制流，2=Load，3=Store。ROB 
 | `rob_tag_t` | `index:RW` |
 | `fetch_packet_t` | `pc:32, inst:32, pred_npc:32` |
 | `decoded_uop_t` | `pc:32, pred_npc:32, op:6, rs1:5, rs2:5, rd:5, imm:32` |
-| `rob_alloc_t` | `rd:5, pdst:PW, kind:2, sq_id:SIDW` |
+| `rob_alloc_t` | `old_pdst:PW, kind:2, sq_id:SIDW` |
 | `alu_iq_t` | `rob:rob_tag_t, cp_id:CIDW, op:6, pdst:PW, ps1:PW, ps2:PW, pc:32, imm:32` |
 | `mem_iq_t` | `rob:rob_tag_t, mem_op:3, mem_id:MIDW, ps1:PW, ps2:PW, imm:32` |
 | `mem_alloc_t` | `is_store:1, mem_id:MIDW, rob:rob_tag_t, pdst:PW` |
@@ -112,7 +112,7 @@ ROB 单独保存 2 位 `kind`：0=普通，1=控制流，2=Load，3=Store。ROB 
 | `branch_resolve_t` | `rob:rob_tag_t, cp_id:CIDW, npc:32` |
 | `cp_alloc_t` | `cp_id:CIDW, rob:rob_tag_t, pred_npc:32` |
 | `fetch_redirect_t` | `target_pc:32, new_gen:GEN_WIDTH` |
-| `reg_commit_t` | `rd:5, pdst:PW` |
+| `reg_commit_t` | `old_pdst:PW` |
 | `if_req_t` | `gen:GEN_WIDTH, id:FIDW, addr:32` |
 | `if_rsp_t` | `gen:GEN_WIDTH, id:FIDW, data:32` |
 | `ld_req_t` | `gen:GEN_WIDTH, id:LIDW, addr:32` |
@@ -136,18 +136,18 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 | `TAG_BITS` | RW | 5 |
 | `FETCH_BITS` | 32 + 32 + 32 | 96 |
 | `DECODE_BITS` | 32 + 32 + 6 + 5 + 5 + 5 + 32 | 117 |
-| `ROB_ALLOC_BITS` | 5 + PW + 2 + SIDW | 16 |
-| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 98 |
-| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 58 |
-| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 18 |
-| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 150 |
-| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 81 |
-| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 110 |
-| `RESULT_BITS` | TAG_BITS + PW + 32 | 46 |
-| `RESOLVE_BITS` | TAG_BITS + CIDW + 32 | 42 |
-| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 42 |
+| `ROB_ALLOC_BITS` | PW + 2 + SIDW | 11 |
+| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 95 |
+| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 55 |
+| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 15 |
+| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 147 |
+| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 78 |
+| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 107 |
+| `RESULT_BITS` | TAG_BITS + PW + 32 | 43 |
+| `RESOLVE_BITS` | TAG_BITS + CIDW + 32 | 39 |
+| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
-| `REG_COMMIT_BITS` | 5 + PW | 11 |
+| `REG_COMMIT_BITS` | PW | 6 |
 | `IF_REQ_BITS` | GEN_WIDTH + FIDW + 32 | 52 |
 | `IF_RSP_BITS` | GEN_WIDTH + FIDW + 32 | 52 |
 | `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
@@ -187,7 +187,7 @@ Fetch 预留一个槽后保存 pc/pred_npc，将下一个取指 PC 更新为所�
 
 RAM 内槽发送携带 `{gen,id}` 的 if_req 保持型请求，桥接受后增加未完成读数。if_rsp 是无 ready 事件，每次事件都减少计数；只有 `gen` 等于该槽发出时锁存的 generation、对应 slot 仍等待该响应且当拍没有 fetch_redirect 时才写槽，否则只归还额度并丢弃数据。RAM 外 PC 不发 AR，原槽填 inst=0 并标记就绪，不占读额度。
 
-fetch_redirect 当拍取消未被桥接受的 offer 和旧输出包，边沿清旧槽并设置目标 PC；发生实际重定向时 `current_gen` 自增（见第 12 节），新槽发出时锁存新 generation。未完成读计数不清零。下一拍即可创建新路径槽，不等待旧响应；IFETCH_OUTSTANDING 仍统计全部已接受未返回请求，旧事务占用额度时新请求正常背压。复位 PC=RESET_PC、current_gen=0。
+fetch_redirect 当拍取消未被桥接受的 offer 和旧输出包，边沿清旧槽、设置目标 PC，并把本地 `fetch_gen` 更新为 payload 中的 `new_gen`；新槽发出时锁存该 `fetch_gen`。generation 只由 branch_ctrl 产生，Fetch 不自行执行 `current_gen+1`。未完成读计数不清零。下一拍即可创建新路径槽，不等待旧响应；IFETCH_OUTSTANDING 仍统计全部已接受未返回请求，旧事务占用额度时新请求正常背压。复位 PC=RESET_PC、fetch_gen=0。
 
 最老且按预测流连续就绪的至多 D 个槽形成 fetch_packet 包，PC 不要求连续。valid 时 count 为 1..D，整包接受；背压期间 count 和载荷保持。Decode 纯组合转换：decode_valid=fetch_valid、fetch_ready=decode_ready，count 原样传递。Rename 缓冲已接收的包。
 
@@ -221,15 +221,15 @@ Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选�
 | disp_lsq[D] | LSU | mem_alloc_t，仅访存 lane 有意义 |
 | disp_src1_ready/disp_src2_ready[D] | 两个 IQ | 源就绪侧带，在对应派遣事件采样 |
 | cp_alloc_valid[D]、cp_alloc_payload[D] | branch_ctrl | 控制流 lane 的 cp_alloc_t 分配事件；Rename 同拍保存快照 |
-| front_redirect_valid/payload | branch_ctrl | 非控制流错误预测的前端纠正事件 |
+| front_redirect_valid/front_redirect_pc | branch_ctrl | 非控制流错误预测的前端纠正事件，仅给出真实下一 PC |
 
 顶层根据 disp_rob.kind 统计 need_alu/need_mem/need_lq/need_sq；统一 fire 为 `disp_valid && disp_ready`，disp_ready 由 !squash_valid 及四类队列和 ROB 的容量满足条件产生。Checkpoint 候选已在形成 offer 时锁定；除了这个 offer 没有其他新资源申请者，分支恢复只消费既有预留编号并取消旧 offer，故背压期间候选不会被抢走。ROB 接收 disp_fire、disp_count 和 disp_rob；IQ 接收按类别与 fire 生成的逐 lane disp_valid；LSU 接收同样的访存 lane 事件。无效 lane 载荷不消费，不为 LSU 或 IQ 传递全核 count 和其他模块的投影。
 
-Rename 按包内顺序读取临时推测 RAT 的源映射，为非零 rd 分配最低编号空闲 pdst，再更新临时 RAT；后续 lane 读取更新后的映射。ps1/ps2=0 时源总是就绪。只有 fire 才更新推测 RAT、空闲表和分配状态。offer 中编号保持，源就绪侧带读取实时 ready 表并合入当拍唤醒；若源来自同包较老 lane 的新目的则未就绪。
+Rename 按包内顺序读取临时推测 RAT 的源映射；对非零 rd，先把更新前映射记录为该 lane 的 `old_pdst`，再分配最低编号空闲 pdst 并更新临时 RAT；无目的写 lane 的 `old_pdst=0`。后续 lane 读取更新后的映射。ps1/ps2=0 时源总是就绪。只有 fire 才更新推测 RAT、空闲表和分配状态。offer 中编号保持，源就绪侧带读取实时 ready 表并合入当拍唤醒；若源来自同包较老 lane 的新目的则未就绪。
 
 所有 cp_alloc_valid 均包含统一 fire，非控制流 lane 无事件。cp_alloc_payload 的身份为 `{(rob_tail+lane) mod R}`；按包内控制流次序选 cp_alloc_id。资源不足时可派遣更短前缀，不能派遣没有 checkpoint 的分支。
 
-不维护 committed RAT，只保留推测 RAT（sRAT）。ROB 为每条写寄存器指令保存 old_pdst；退休时 Rename 直接释放该 old_pdst（按 lane 从老到新依次释放，支持同拍同物理寄存器多次释放）。reg_commit_valid 仅在该退休 lane 写寄存器时为 1，reg_commit_payload 携带该 lane 的 old_pdst，其余 lane 无事件。
+不维护 committed RAT，只保留推测 RAT（sRAT）。ROB 为每条写寄存器指令保存 old_pdst；退休时 Rename 直接释放该 old_pdst（按 lane 从老到新依次释放，支持同拍同物理寄存器多次释放）。reg_commit_valid 仅在该退休 lane 写寄存器时为 1，reg_commit_payload 仅携带该 lane 的 old_pdst，其余 lane 无事件。
 
 当拍释放的物理寄存器和队列槽从下一拍起参与分配，不做容量组合穿透。复位推测 RAT 为 xN→pN；p0..p31 就绪，其他物理寄存器空闲且未就绪。p0 固定为零且不分配为目的。
 
@@ -245,7 +245,7 @@ cp_release_mask 在解析后回收元数据与对应快照；正确预测立即�
 
 ### 6.4 非控制流的错误预测
 
-在形成 offer 时扫描到首个非控制流且 pred_npc!=PC+4 的指令，将前缀截到该指令。front_redirect_payload 保存 PC+4 和目标 generation（current_gen+1），valid 仅在该前缀 fire 时产生。
+在形成 offer 时扫描到首个非控制流且 pred_npc!=PC+4 的指令，将前缀截到该指令。`front_redirect_pc=PC+4`，valid 仅在该前缀 fire 时产生；Rename 不读取或计算 generation。branch_ctrl 接收该事件后统一生成 `new_gen=current_gen+1` 和 `fetch_redirect`。
 
 纠正保留这个前缀的全部正常重命名、checkpoint 和派遣更新，只清除 Fetch 及 Rename 的年轻后缀/输入缓冲；不截断 ROB、不恢复 RAT。与更老执行期恢复同拍时，squash_valid 禁止 fire，因此不产生 front_redirect。disp_ready 不能由 fetch_redirect_valid 门控，否则前端纠正与自己的派遣构成组合环。
 
@@ -305,13 +305,13 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 
 ## 9. ROB 与退休
 
-ROB 每项保存 index、old_pdst、rob_alloc_t、done 和 Store 授权/响应状态，不保存原指令、PC、预测值、实际目标、mispred 或 checkpoint 副本。头尾索引仍为 RW 位。ROB 不输出 generation 占用向量。
+ROB 每项保存 `rob_alloc_t`（其中含 old_pdst/kind/sq_id）、done 和 Store 授权/响应状态，不保存原指令、PC、预测值、实际目标、mispred 或 checkpoint 副本。头尾索引仍为 RW 位。ROB 不输出 generation 占用向量。
 
 非 Store 指令（含控制流、Load）每拍退休至多 C 条连续已完成前缀；遇到未完成项或 Store 停止，较老前缀先退休。控制流与其他非 Store 指令共用退休宽度，不截断前缀，也不再触发恢复；实际目标的解析事件在其首次结果可见时已处理。Store 仍在头部单独授权、等待写完成后单独退休。当拍完成最早下一拍退休；squash 当拍的退休前缀不得包含边界之后的年轻项。
 
 Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 后 ROB 记已响应，最早下一拍退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
 
-ROB 只向 Rename 发出写寄存器退休 lane 的 reg_commit_valid/rd/old_pdst，允许空洞。退休时 Rename 直接释放 old_pdst；LSU 不接退休广播。
+ROB 只向 Rename 发出写寄存器退休 lane 的 reg_commit_valid/old_pdst，允许空洞；`old_pdst!=0` 即表示该项存在架构寄存器写。退休时 Rename 直接释放 old_pdst；LSU 不接退休广播。
 
 squash 边界 b 来自尚未退休的解析分支。按周期开始时 head 计算 keep_count=age(b)+1，令 tail=(b.index+1) mod R，清除其后年轻项。更老同拍退休 m 项仍生效：head 正常前移，count=keep_count-m；触发分支尚未在本拍完成状态中退休，不提前释放。所有有效的较老 done/Store 完成继续更新保留项。squash 当拍不接新派遣。ROB 不向 branch_ctrl 发退休恢复事件。
 
@@ -334,7 +334,7 @@ load_bits    = read_data >> (8 * offset)
 
 size 为本地译码结果，不是流水接口字段。Load 按大小截取并符号/零扩展。RAM 门控只比较 effective_addr[31:28]==0；自然对齐访问不会跨越对齐字或 RAM 边界，无对齐检查或末字节范围加法器。
 
-RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。ld_req 为保持型通道，携带 `{gen,id}`（gen 为该 Load 发出时锁存的 current_gen），桥接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
+RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。LSU 从 branch_ctrl 接收 `current_gen`；形成新的 ld_req offer 时把当时的 `current_gen` 锁存在该 LQ 槽中。ld_req 为保持型通道，携带 `{gen,id}`，桥接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
 
 非 RAM Load 不发请求，在其 LQ 产生零值并标记数据就绪，不占读额度，不等待 Store 消歧或外部响应。这使任意错误路径 Load 不访问 MMIO，也不会等待不存在的结果。
 
@@ -372,15 +372,15 @@ Fetch 和 LSU 为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_r
 
 ### 12.1 Generation 方案
 
-branch_ctrl 维护全局 `current_gen[15:0]`，复位为 0。**每次发生实际 redirect**（分支误预测或 `front_redirect` 前端纠正）时执行 `current_gen++`。generation 只用于异步读请求的身份匹配：`if_req/if_rsp` 和 `ld_req/ld_rsp` 携带 `{gen,id}`。
+branch_ctrl 维护全局 `current_gen[GEN_WIDTH-1:0]`，默认 `GEN_WIDTH=16`，复位为 0。**每次发生实际 redirect**（分支误预测或 `front_redirect` 前端纠正）时组合得到 `new_gen=current_gen+1`，在恢复边沿更新 `current_gen<=new_gen`，并把同一个 `new_gen` 放入 `fetch_redirect`。generation 只用于异步读请求的身份匹配：`if_req/if_rsp` 和 `ld_req/ld_rsp` 携带 `{gen,id}`。
 
 - 请求发出后在该槽锁存当时的 generation；响应只有在 `{gen,id}` 与该槽记录匹配时才被接受，否则只归还 outstanding 额度并丢弃数据。
-- 约定 16 位 generation 在任何旧读事务存活期间不会回绕碰撞（in-flight 读事务数远小于 2^16）。
+- 约定从任一读请求被 bridge 接收到其响应返回期间，发生的实际 redirect 次数严格小于 `2^16`，因此 16 位 generation 不会发生 ABA 回绕碰撞。该假设约束的是旧请求存活期间的 redirect 次数，与同时 outstanding 的读事务数量没有直接关系。
 - 不设 epoch 池、`recovery_epoch`、`epoch_free`、`epoch_alloc_id`、`rob_epoch_busy`、`bridge_epoch_busy`。ROB tag 只含 rob_id/index，后端不携带 generation。
 
 cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控制流指令分配一个 checkpoint；末尾若有普通指令前端纠正，不额外占用 checkpoint。分配只在统一 fire 的 cp_alloc/front_redirect 事件生效；预览数量为 min(容量,输出 lane 数)，其余 lane 不消费。
 
-分支 checkpoint 不预留 generation。误预测时直接使用 `current_gen+1`（自增后的当前值）作为重定向目标 generation；`front_redirect` 同样使用 `current_gen+1`。没有可用 checkpoint 时，Rename 在相关指令之前背压；已经派遣的分支解析仍能立即重定向。
+分支 checkpoint 不预留 generation。误预测和 `front_redirect` 都由 branch_ctrl 统一计算 `new_gen=current_gen+1`，同拍用于 `fetch_redirect.new_gen`，并在边沿写回 `current_gen`。没有可用 checkpoint 时，Rename 在相关指令之前背压；已经派遣的分支解析仍能立即重定向。
 
 ### 12.2 解析与控制接口
 
@@ -395,7 +395,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 控制器对每个解析候选匹配 checkpoint 的有效位及完整 tag。匹配的误预测按恢复前 rob_head 选择最老者 b；产生 squash(b)、restore_cp_id、fetch_redirect 和新 generation（`current_gen+1`）。cp_release_mask 同时包含 b、更年轻 checkpoint，以及本拍正确解析且不年轻于 b 的 checkpoint。没有误预测时只释放正确解析项。
 
-执行期恢复优先于 front_redirect；前者通过 squash_valid 取消当拍新派遣，所以两者不会共同生效。没有执行期恢复时，front_redirect 与该 offer 的 cp_alloc 同拍生效，前缀属于旧 generation，新 generation 只用于下一拍前端/派遣。cp_release 不阻止不相关的正常派遣，但释放出来的资源下一拍才可选。
+执行期恢复优先于 front_redirect；前者通过 squash_valid 取消当拍新派遣，所以两者不会共同生效。没有执行期恢复时，front_redirect 与该 offer 的 cp_alloc 同拍生效；已在该拍形成或接受的旧请求保持原 generation，新 generation 从恢复边沿后用于新建 Fetch 槽以及之后新发出的 Load 请求。cp_release 不阻止不相关的正常派遣，但释放出来的资源下一拍才可选。
 
 控制流解析候选来自 ALU 已锁存状态，不依赖 squash；控制器不依赖 ROB 的 done 或 write_valid，WB 按恢复广播和周期开始时的 rob_head 单向筛选结果。因此执行期重定向、结果筛选与写回不构成组合环。
 
@@ -405,7 +405,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 | 模块 | 恢复行为 |
 |---|---|
-| Fetch | 清全部旧前端槽/offer/输出，设置目标 PC（并向控制器产生新 generation），保留未完成读计数 |
+| Fetch | 清全部旧前端槽/offer/输出，消费 branch_ctrl 给出的目标 PC/new_gen，更新本地 fetch_gen，保留未完成读计数 |
 | Rename | 清未派遣缓冲，按 checkpoint 恢复推测 RAT/回收年轻目的；继续接收较老退休和存活唤醒 |
 | ROB | 保留至 b，尾部截断；较老同拍退休、完成和 Store 回报继续生效 |
 | IQ/issue_sched | 仅删除年轻项/入口，屏蔽年轻 take/执行握手，允许存活候选继续发射 |
@@ -477,7 +477,6 @@ module fetch #(
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
     parameter integer FETCH_BITS = 32 + 32 + 32,
     parameter integer FETCH_REDIRECT_BITS = 32 + GEN_WIDTH,
@@ -536,12 +535,10 @@ module rename #(
     parameter integer LQ_DEPTH = 8,
     parameter integer SQ_DEPTH = 8,
     parameter integer CHECKPOINT_DEPTH = 4,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer MIDW = (LIDW > SIDW) ? LIDW : SIDW,
     parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
@@ -553,13 +550,12 @@ module rename #(
     parameter integer CCW = $clog2(CHECKPOINT_DEPTH + 1),
     parameter integer TAG_BITS = RW,
     parameter integer DECODE_BITS = 32 + 32 + 6 + 5 + 5 + 5 + 32,
-    parameter integer ROB_ALLOC_BITS = 5 + PW + 2 + SIDW,
+    parameter integer ROB_ALLOC_BITS = PW + 2 + SIDW,
     parameter integer ALU_IQ_BITS = TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32,
     parameter integer MEM_IQ_BITS = TAG_BITS + 3 + MIDW + PW + PW + 32,
     parameter integer MEM_ALLOC_BITS = 1 + MIDW + TAG_BITS + PW,
     parameter integer CP_ALLOC_BITS = CIDW + TAG_BITS + 32,
-    parameter integer FETCH_REDIRECT_BITS = 32 + GEN_WIDTH,
-    parameter integer REG_COMMIT_BITS = 5 + PW
+    parameter integer REG_COMMIT_BITS = PW
 ) (
     input logic clock,
     input logic reset,
@@ -592,7 +588,7 @@ module rename #(
     output logic [DISPATCH_WIDTH-1:0] cp_alloc_valid,
     output logic [DISPATCH_WIDTH*CP_ALLOC_BITS-1:0] cp_alloc_payload, // cp_alloc_t
     output logic front_redirect_valid,
-    output logic [FETCH_REDIRECT_BITS-1:0] front_redirect_payload, // fetch_redirect_t
+    output logic [31:0] front_redirect_pc,
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     input logic [COMMIT_WIDTH-1:0] reg_commit_valid,
@@ -631,16 +627,14 @@ module rob #(
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer SQ_DEPTH = 8,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
     parameter integer ROB_CW = $clog2(ROB_DEPTH + 1),
     parameter integer TAG_BITS = RW,
-    parameter integer ROB_ALLOC_BITS = 5 + PW + 2 + SIDW,
-    parameter integer REG_COMMIT_BITS = 5 + PW
+    parameter integer ROB_ALLOC_BITS = PW + 2 + SIDW,
+    parameter integer REG_COMMIT_BITS = PW
 ) (
     input logic clock,
     input logic reset,
@@ -673,7 +667,6 @@ module branch_ctrl #(
     parameter integer CHECKPOINT_DEPTH = 4,
     parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer CCW = $clog2(CHECKPOINT_DEPTH + 1),
     parameter integer TAG_BITS = RW,
@@ -690,7 +683,7 @@ module branch_ctrl #(
     input logic [DISPATCH_WIDTH-1:0] cp_alloc_valid,
     input logic [DISPATCH_WIDTH*CP_ALLOC_BITS-1:0] cp_alloc_payload, // cp_alloc_t
     input logic front_redirect_valid,
-    input logic [FETCH_REDIRECT_BITS-1:0] front_redirect_payload, // fetch_redirect_t
+    input logic [31:0] front_redirect_pc,
     input logic [ISSUE_WIDTH-1:0] resolve_valid,
     input logic [ISSUE_WIDTH*RESOLVE_BITS-1:0] resolve_payload, // branch_resolve_t
     output logic [CHECKPOINT_DEPTH-1:0] cp_release_mask,
@@ -714,10 +707,8 @@ module iq_alu #(
     parameter integer PRF_SIZE = 64,
     parameter integer IQ_ALU_DEPTH = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer AIQ_CW = $clog2(IQ_ALU_DEPTH + 1),
     parameter integer TAG_BITS = RW,
@@ -754,12 +745,10 @@ module iq_mem #(
     parameter integer IQ_MEM_DEPTH = 16,
     parameter integer LQ_DEPTH = 8,
     parameter integer SQ_DEPTH = 8,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer MIDW = (LIDW > SIDW) ? LIDW : SIDW,
     parameter integer MIQ_CW = $clog2(IQ_MEM_DEPTH + 1),
     parameter integer TAG_BITS = RW,
@@ -794,12 +783,10 @@ module issue_sched #(
     parameter integer LQ_DEPTH = 8,
     parameter integer SQ_DEPTH = 8,
     parameter integer CHECKPOINT_DEPTH = 4,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer MIDW = (LIDW > SIDW) ? LIDW : SIDW,
     parameter integer TAG_BITS = RW,
@@ -842,10 +829,8 @@ module alu #(
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer TAG_BITS = RW,
     parameter integer ALU_EXEC_BITS = TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32,
@@ -875,10 +860,8 @@ endmodule
 module mul_div #(
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer TAG_BITS = RW,
     parameter integer MUL_EXEC_BITS = TAG_BITS + 3 + PW + 32 + 32,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32
@@ -906,10 +889,8 @@ module wb_arb #(
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
-    parameter integer GEN_WIDTH = 16,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer FU_SRC_COUNT = ISSUE_WIDTH + 2,
     parameter integer TAG_BITS = RW,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32
@@ -952,7 +933,6 @@ module lsu #(
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer MIDW = (LIDW > SIDW) ? LIDW : SIDW,
     parameter integer LQ_CW = $clog2(LQ_DEPTH + 1),
     parameter integer SQ_CW = $clog2(SQ_DEPTH + 1),
@@ -969,6 +949,7 @@ module lsu #(
     input logic squash_valid,
     input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
     input logic [RW-1:0] rob_head,
+    input logic [GEN_WIDTH-1:0] current_gen,
     input logic [DISPATCH_WIDTH-1:0] disp_valid,
     input logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq, // mem_alloc_t × D
     output logic [LQ_CW-1:0] lq_free,
@@ -1007,7 +988,6 @@ module axi_bridge #(
     parameter integer GEN_WIDTH = 16,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
-    parameter integer GW = GEN_WIDTH,
     parameter integer IF_REQ_BITS = GEN_WIDTH + FIDW + 32,
     parameter integer IF_RSP_BITS = GEN_WIDTH + FIDW + 32,
     parameter integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32,
@@ -1055,11 +1035,11 @@ endmodule
 
 - Fetch→Decode→Rename 的包接口不携带 generation；Fetch 在入口按 `{gen,id}` 过滤取指响应，任何重定向都清除尚未派遣的旧前端数据。branch_ctrl.fetch_redirect_* 接 Fetch，current_gen 由 branch_ctrl 维护并用于产生重定向目标。
 - Rename 的 disp_rob 接 ROB，disp_alu/disp_mem 分别接 IQ，disp_lsq 接 LSU。顶层按 disp_rob.kind 和统一 fire 产生 IQ/LSU 的有效 lane，squash 当拍禁止 fire；不要用前端纠正信号反向门控 fire。
-- branch_ctrl 的 checkpoint 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_* 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
+- branch_ctrl 的 checkpoint 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_valid/front_redirect_pc 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
 - rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl、wb_arb，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
 - issue_sched 的 ALU/MUL/MEM 执行投影分别接对应入口；每个入口保留完整身份用于局部取消。PRF 读口及窄 wake_* 连接保持。
 - 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb，由 WB 按 squash 年龄边界筛选后仲裁。
 - wb_arb.done_tag/valid 只接 ROB；write_* 接 PRF，write_valid/pdst 另接 Rename 和两 IQ 的 wake_*。控制流 npc 不进入该广播。
-- ROB.reg_commit_* 只接 Rename（携带 rd 与 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
-- IF/LD 请求与响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 由 branch_ctrl 在每次实际重定向时自增。
+- ROB.reg_commit_* 只接 Rename（仅携带 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
+- IF/LD 请求与响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
 - 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；也不再有 epoch 池相关端口。PRF 不接 squash，写入由 WB 筛选后的 write_valid 控制。外部 AXI 端口保持。
