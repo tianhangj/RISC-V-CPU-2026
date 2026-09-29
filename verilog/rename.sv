@@ -171,6 +171,14 @@ module rename #(
         proposed_front_pc = 0;
         used_alu = 0; used_mem = 0; used_lq = 0; used_sq = 0; used_cp = 0;
         stop_offer = 0;
+        tag = '0;
+        ps1 = '0;
+        ps2 = '0;
+        pdst = '0;
+        old_pdst = '0;
+        mem_id = '0;
+        sq_id = '0;
+        cp_id = '0;
         for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
             proposed_rd[lane] = 0;
             proposed_pdst[lane] = 0;
