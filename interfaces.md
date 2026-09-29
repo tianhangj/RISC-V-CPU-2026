@@ -1,6 +1,6 @@
 # RV32IM 无缓存乱序核接口规范
 
-版本：v1.3。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.4。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
@@ -259,7 +259,7 @@ IQ 仅接收自己的派遣投影及 `wake_valid[W]/wake_pdst[W]`，不接收结
 
 issue_sched 合并两组候选，按 ROB 年龄选择可容纳的最老项，每拍总 take 数不超过 I。它保留 I 个 ALU 入口、一个 MULDIV 入口、一个 AGU 入口，各深度 1；周期开始时为空的入口可接收新项。ALU IQ 的 op=38..45 投影到 mul_exec_t，其他项投影到 alu_exec_t；MEM IQ 投影到 mem_exec_t。
 
-PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；同址读写组合旁路返回当拍写值。已在 IQ 中的依赖收到唤醒后最早下一拍候选。
+PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。IQ 候选只使用周期开始时已有的项及其已锁存就绪位，不组合合入当拍唤醒；依赖收到唤醒后最早下一拍成为候选。派遣与唤醒同拍时仍记录该唤醒，但新项最早下一拍成为候选，此时 PRF 写入已完成。
 
 PRF 复位只需将 p1..p31 的初始架构值设零；p0 可直接用常量实现，其他数据不复位。checkpoint 恢复只处理被 squash 的目的和映射，不清 PRF 数据。
 
@@ -291,9 +291,11 @@ IQ、发射入口、ALU/MULDIV、AGU、LSU 完成缓冲按第 12 节取消年轻
 
 ### 8.2 完成仲裁与消费者
 
-wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result_t，不携带控制流目标。源编号 0..I-1 为 ALU、I 为 MULDIV、I+1 为 LSU。仲裁前将每个源的 tag 通过 wb_probe_tag[I+2] 送 ROB，ROB 组合返回 wb_probe_live[I+2]：当前活跃槽的 epoch 匹配，且该项不在本拍 squash 年轻范围内。这个身份筛选是防止旧结果写入已复用目的的功能门控，不是诊断接口。
+wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result_t，不携带控制流目标。源编号 0..I-1 为 ALU、I 为 MULDIV、I+1 为 LSU。WB 直接接收 squash_valid/tag 和 rob_head，仲裁前按周期开始时的 head 屏蔽本拍 squash 的年轻结果，不向 ROB 发起存活查询，也不按 current_epoch 筛选。
 
-只在 result_valid 且 probe_live 时参加 W 路轮询仲裁，每源每拍至多一个；指针移至最后接收源之后，没有存活接收则保持。无效身份的有效结果直接 ready 接收并丢弃，不占 WB lane。被取消的 FU 也可直接撤销其年轻结果 valid。probe 查询不依赖 result_ready/done_valid，避免环路。
+此筛选依赖第 2 节既有的内部生命周期约定：每条指令只产生一次被接收的完成，接收后源清除该结果；被 squash 的内部工作在该边沿取消，之后不能重现旧结果。LSU 先按 LQ 完整身份过滤外部迟到响应，再产生结果。因此待仲裁结果均属于周期开始时活跃的 ROB 项，只需处理本拍 squash 的年龄边界。
+
+只在 result_valid 且未被本拍 squash 时参加 W 路轮询仲裁，每源每拍至多一个；指针移至最后接收源之后，没有存活接收则保持。被 squash 的有效结果直接 ready 接收并丢弃，不占 WB lane。被取消的 FU 也可直接撤销其年轻结果 valid。
 
 | 输出 | 接收方 | 内容 |
 |---|---|---|
@@ -307,7 +309,7 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 
 ROB 每项保存 epoch、rob_alloc_t、done 和 Store 授权/响应状态，不保存原指令、PC、预测值、实际目标、mispred 或 checkpoint 副本。头尾索引仍为 RW 位。rob_epoch_busy[e] 表示存在属于 e 的活跃项，由周期开始时状态产生；同拍退休、分配和截断的结果下一拍反映到该向量。
 
-普通指令每拍退休至多 C 条连续已完成前缀；遇到未完成、控制流或 Store 停止，较老普通前缀先退休。控制流在头部且完成后单独退休，不再触发恢复；实际目标的解析事件在其首次结果可见时已处理。Store 仍单独授权、等待写完成后退休。当拍完成最早下一拍退休。
+非 Store 指令（含控制流、Load）每拍退休至多 C 条连续已完成前缀；遇到未完成项或 Store 停止，较老前缀先退休。控制流与其他非 Store 指令共用退休宽度，不截断前缀，也不再触发恢复；实际目标的解析事件在其首次结果可见时已处理。Store 仍在头部单独授权、等待写完成后单独退休。当拍完成最早下一拍退休；squash 当拍的退休前缀不得包含边界之后的年轻项。
 
 Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 后 ROB 记已响应，最早下一拍退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
 
@@ -315,7 +317,7 @@ ROB 只向 Rename 发出写寄存器退休 lane 的 reg_commit_valid/rd/pdst，�
 
 squash 边界 b 来自尚未退休的解析分支。按周期开始时 head 计算 keep_count=age(b)+1，令 tail=(b.index+1) mod R，清除其后年轻项。更老同拍退休 m 项仍生效：head 正常前移，count=keep_count-m；触发分支尚未在本拍完成状态中退休，不提前释放。所有有效的较老 done/Store 完成继续更新保留项。squash 当拍不接新派遣。ROB 不向 branch_ctrl 发退休恢复事件。
 
-wb_probe_live 查询只使用当前占用区间、该槽 epoch 和 squash 边界；不依据 current_epoch，也不比较目的值。这样新旧 epoch 的存活指令可以同时完成。
+ROB 接收 done_valid/done_tag 时在本地匹配当前占用区间、该槽 epoch 和 squash 边界，仅更新匹配且存活项的 done，不向 WB 返回组合筛选结果；不依据 current_epoch，也不比较目的值。这样新旧 epoch 的存活指令可以同时完成。
 
 ## 10. LSU 与槽位回收
 
@@ -383,8 +385,8 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint；epoch_alloc_id[D+1] 给�
 | 信号 | 生产者 → 消费者 | 含义 |
 |---|---|---|
 | resolve_valid[I]/resolve_payload[I] | ALU → branch_ctrl | 一次性 branch_resolve_t 候选，独立于 WB |
-| squash_valid | branch_ctrl → ROB、Rename、IQ、issue_sched、FU、LSU | 执行期局部恢复事件 |
-| squash_tag | branch_ctrl → ROB、IQ、issue_sched、FU、LSU | 最老误预测分支身份，供年龄比较；Rename 只使用 restore_cp_id |
+| squash_valid | branch_ctrl → ROB、Rename、IQ、issue_sched、FU、LSU、wb_arb | 执行期局部恢复事件 |
+| squash_tag | branch_ctrl → ROB、IQ、issue_sched、FU、LSU、wb_arb | 最老误预测分支身份，供年龄比较；Rename 只使用 restore_cp_id |
 | restore_cp_id | branch_ctrl → Rename | squash 当拍读取的快照编号 |
 | cp_release_mask[K] | branch_ctrl → Rename | 本拍解析/清除的 checkpoint；恢复读取优先于释放 |
 | fetch_redirect_valid/payload | branch_ctrl → Fetch | 目标 PC 与新 epoch，来自执行期恢复或前端纠正 |
@@ -395,11 +397,11 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint；epoch_alloc_id[D+1] 给�
 
 执行期恢复优先于 front_redirect；前者通过 squash_valid 取消当拍新派遣，所以两者不会共同生效。没有执行期恢复时，front_redirect 与该 offer 的 cp_alloc 同拍生效，前缀属于旧 current_epoch，新 epoch 只用于下一拍前端/派遣。cp_release 不阻止不相关的正常派遣，但释放出来的资源下一拍才可选。
 
-控制流解析候选来自 ALU 已锁存状态，不依赖 squash；控制器不依赖 ROB 的 done 或 write_valid，ROB 的身份查询也不依赖 WB 接收事件。因此执行期重定向、结果筛选与写回不构成组合环。
+控制流解析候选来自 ALU 已锁存状态，不依赖 squash；控制器不依赖 ROB 的 done 或 write_valid，WB 按恢复广播和周期开始时的 rob_head 单向筛选结果。因此执行期重定向、结果筛选与写回不构成组合环。
 
 ### 12.3 年龄边界与事件优先级
 
-恢复时 `younger(tag,b) = age(tag.index) > age(b.index)`，使用边沿前同一个 rob_head；仅用于当前活跃内部工作。先按完整身份筛除晚到响应/结果，再比较年龄，不能把已失效旧标签直接当成当前槽的年龄。epoch 既不表示年龄，也不是“只允许当前 epoch 执行”的全局开关。
+恢复时 `younger(tag,b) = age(tag.index) > age(b.index)`，使用边沿前同一个 rob_head；仅用于当前活跃内部工作。外部迟到响应先由 Fetch/LSU 按完整身份筛除；内部结果按第 8.2 节的生命周期约定保持活跃，再比较年龄，不能把已失效旧标签直接当成当前槽的年龄。epoch 既不表示年龄，也不是“只允许当前 epoch 执行”的全局开关。
 
 | 模块 | 恢复行为 |
 |---|---|
@@ -409,7 +411,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint；epoch_alloc_id[D+1] 给�
 | IQ/issue_sched | 仅删除年轻项/入口，屏蔽年轻 take/执行握手，允许存活候选继续发射 |
 | ALU/MULDIV | 仅取消年轻运算和结果，保留 b 的链接结果及更老长延迟运算 |
 | LSU | 仅清年轻队列/请求/结果；保留较老读写和授权状态，所有响应仍归还额度 |
-| wb_arb/PRF | 只接受 ROB 身份与年龄筛选通过的完成；没有全局清空或恢复时全局禁写 |
+| wb_arb/PRF | WB 按 squash 年龄边界屏蔽年轻完成，PRF 只接收存活写入；没有全局清空或恢复时全局禁写 |
 | AXI bridge | 不参与 squash，保持协议履约并接收有额度的新请求 |
 
 恢复当拍禁止新派遣，空闲槽及回收物理寄存器从下一拍使用；存活的正常事件不被整体冻结。Fetch 在恢复边沿设置 PC/epoch，下一拍可建立正确路径请求。没有 DRAIN/RESTORE 等待状态或全模块确认向量，checkpoint 恢复在该边沿完成。
@@ -637,7 +639,6 @@ endmodule
 
 ```systemverilog
 module rob #(
-    parameter integer ISSUE_WIDTH = 2,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
@@ -651,7 +652,6 @@ module rob #(
     parameter integer EW = (EPOCH_COUNT > 1) ? $clog2(EPOCH_COUNT) : 1,
     parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
     parameter integer ROB_CW = $clog2(ROB_DEPTH + 1),
-    parameter integer FU_SRC_COUNT = ISSUE_WIDTH + 2,
     parameter integer TAG_BITS = EW + RW,
     parameter integer ROB_ALLOC_BITS = 5 + PW + 2 + SIDW,
     parameter integer REG_COMMIT_BITS = 5 + PW
@@ -666,8 +666,6 @@ module rob #(
     input logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob, // rob_alloc_t × D
     input logic [WB_WIDTH-1:0] done_valid,
     input logic [WB_WIDTH*TAG_BITS-1:0] done_tag, // rob_tag_t × W
-    input logic [FU_SRC_COUNT*TAG_BITS-1:0] wb_probe_tag, // rob_tag_t × (I+2)
-    output logic [FU_SRC_COUNT-1:0] wb_probe_live,
     output logic [EPOCH_COUNT-1:0] rob_epoch_busy,
     output logic [ROB_CW-1:0] rob_free,
     output logic [RW-1:0] rob_tail,
@@ -939,6 +937,9 @@ module wb_arb #(
 ) (
     input logic clock,
     input logic reset,
+    input logic squash_valid,
+    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic [RW-1:0] rob_head,
     input logic [ISSUE_WIDTH-1:0] alu_result_valid,
     output logic [ISSUE_WIDTH-1:0] alu_result_ready,
     input logic [ISSUE_WIDTH*RESULT_BITS-1:0] alu_result_payload, // result_t
@@ -948,8 +949,6 @@ module wb_arb #(
     input logic lsu_result_valid,
     output logic lsu_result_ready,
     input logic [RESULT_BITS-1:0] lsu_result_payload, // result_t
-    output logic [FU_SRC_COUNT*TAG_BITS-1:0] wb_probe_tag, // rob_tag_t × (I+2)
-    input logic [FU_SRC_COUNT-1:0] wb_probe_live,
     output logic [WB_WIDTH-1:0] done_valid,
     output logic [WB_WIDTH*TAG_BITS-1:0] done_tag, // rob_tag_t × W
     output logic [WB_WIDTH-1:0] write_valid,
@@ -1078,11 +1077,11 @@ endmodule
 
 - Fetch→Decode→Rename 的包接口不携带额外 epoch；Fetch 在入口过滤取指响应，任何重定向都清除尚未派遣的旧前端数据。branch_ctrl.fetch_redirect_* 接 Fetch，current_epoch 接 Rename。
 - Rename 的 disp_rob/disp_epoch 接 ROB，disp_alu/disp_mem 分别接 IQ，disp_lsq 接 LSU。顶层按 disp_rob.kind 和统一 fire 产生 IQ/LSU 的有效 lane，squash 当拍禁止 fire；不要用前端纠正信号反向门控 fire。
-- branch_ctrl 的 checkpoint/epoch 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_* 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU 和 LSU 接 squash_valid/tag，Rename 只接 squash_valid。WB 通过 ROB 的 probe_live 取得筛选结果，不另接恢复广播。
-- rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
+- branch_ctrl 的 checkpoint/epoch 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_* 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
+- rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl、wb_arb，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
 - issue_sched 的 ALU/MUL/MEM 执行投影分别接对应入口；每个入口保留完整身份用于局部取消。PRF 读口及窄 wake_* 连接保持。
-- 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb；wb_probe_tag/live 在 wb_arb 与 ROB 之间往返组合查询。
+- 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb，由 WB 按 squash 年龄边界筛选后仲裁。
 - wb_arb.done_tag/valid 只接 ROB；write_* 接 PRF，write_valid/pdst 另接 Rename 和两 IQ 的 wake_*。控制流 npc 不进入该广播。
 - ROB.reg_commit_* 只接 Rename；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/桥的写请求和完成无 epoch/ID，不受年轻分支恢复取消。
 - IF/LD 请求与响应都传递 epoch/id；桥保留并原样返回，客户端匹配身份。ROB 的 rob_epoch_busy 和桥的 bridge_epoch_busy 接 branch_ctrl；旧事务与新事务可以同时在桥中存在。
-- 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；PRF 不接 squash，写入由已完成身份筛选的 write_valid 控制。外部 AXI 端口保持。
+- 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；PRF 不接 squash，写入由 WB 筛选后的 write_valid 控制。外部 AXI 端口保持。
