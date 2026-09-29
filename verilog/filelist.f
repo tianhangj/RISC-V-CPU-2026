@@ -3,3 +3,18 @@
 # Example entries:
 # student_top.sv
 # core.sv
+decode.sv
+alu.sv
+mul_div.sv
+wb_arb.sv
+prf.sv
+rob.sv
+branch_ctrl.sv
+fetch.sv
+axi_bridge.sv
+iq_alu.sv
+iq_mem.sv
+issue_sched.sv
+lsu.sv
+rename.sv
+student_top.sv
