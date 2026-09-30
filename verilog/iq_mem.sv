@@ -24,9 +24,36 @@ module iq_mem #(
     output logic [MEM_IQ_BITS-1:0] cand_uop,
     input logic cand_take
 );
+    logic iq_cand_valid, iq_cand_take;
+    logic [MEM_IQ_BITS-1:0] iq_cand_uop;
+    logic candidate_valid_q;
+    logic [MEM_IQ_BITS-1:0] candidate_reg;
+    wire [RW-1:0] candidate_age = candidate_reg[MEM_IQ_BITS-1 -: RW] - rob_head;
+    wire [RW-1:0] iq_candidate_age = iq_cand_uop[MEM_IQ_BITS-1 -: RW] - rob_head;
+
     iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
-        .RW(RW), .PW(PW), .CW(MIQ_CW)) core (.*,
-        .free_count(mem_iq_free));
+        .BYPASS_WAKE(1), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
+        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .wake_valid, .wake_pdst, .free_count(mem_iq_free),
+        .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
+        .cand_take(iq_cand_take));
+
+    assign cand_valid = candidate_valid_q &&
+        (!squash_valid || candidate_age <= (squash_tag - rob_head));
+    assign cand_uop = candidate_reg;
+    assign iq_cand_take = (!candidate_valid_q || cand_take || !cand_valid) &&
+        iq_cand_valid &&
+        (!squash_valid || iq_candidate_age <= (squash_tag - rob_head));
+
+    always_ff @(posedge clock) begin
+        if (reset) begin
+            candidate_valid_q <= 0;
+        end else if (!candidate_valid_q || cand_take || !cand_valid) begin
+            candidate_valid_q <= iq_cand_take;
+            if (iq_cand_take) candidate_reg <= iq_cand_uop;
+        end
+    end
 endmodule

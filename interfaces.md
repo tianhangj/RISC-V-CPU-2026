@@ -253,11 +253,11 @@ cp_release_mask 在解析后回收元数据与对应快照；正确预测立即�
 
 IQ 仅接收自己的派遣投影及 `wake_valid[W]/wake_pdst[W]`，不接收结果数据、ROB 完成信息、控制流目标或退休信息。各 IQ 存储本地有效位与源就绪位，每拍给出至多 I 个按 ROB 年龄排序的就绪候选。Rename 的物理 ready 表在派遣时清新目的位，在 wake_valid 时置对应目的位；IQ 在派遣时采样源就绪，随后按源物理编号匹配唤醒。
 
-候选接口为 cand_valid[I]、cand_uop[I]、cand_take[I]。ALU IQ 在候选选择后有 I 个 candidate_reg 队列项，每项保存一条指令；就绪指令在 IQ entry→candidate_reg 的上升沿正式离开 IQ 并释放原槽，下一拍才对 issue_sched 可见。alu_iq_free 只统计 IQ 内部空槽，不包含 candidate_reg；cand_take 在上升沿消费对应 candidate_reg 项，同拍可从 IQ 补入新项。candidate_reg 输出按 ROB 年龄排序，背压时保留未消费项；squash 当拍屏蔽年轻候选并在边沿移除，只允许存活指令补入。MEM IQ 仍将组合候选作为预览，内部保存候选对应槽号，在 cand_take 上升沿移除该槽。同一指令在候选接口只出现一次。
+候选接口为 cand_valid[I]、cand_uop[I]、cand_take[I]。ALU IQ 在候选选择后有 I 个 candidate_reg 队列项，MEM IQ 有一个 candidate_reg 队列项，每项保存一条指令；就绪指令在 IQ entry→candidate_reg 的上升沿正式离开 IQ 并释放原槽，下一拍才对 issue_sched 可见。alu_iq_free 和 mem_iq_free 只统计各自 IQ 内部空槽，不包含 candidate_reg；cand_take 在上升沿消费对应 candidate_reg 项，同拍可从 IQ 补入新项。ALU candidate_reg 输出按 ROB 年龄排序，MEM 每次搬入 ROB 年龄最老的就绪项；背压时保留未消费项。squash 当拍屏蔽年轻候选并在边沿移除，只允许存活指令补入。同一指令在候选接口只出现一次。
 
 issue_sched 合并两组候选，按 ROB 年龄选择可容纳的最老项，每拍总 take 数不超过 I。它保留 I 个 ALU 入口、一个 MULDIV 入口、一个 AGU 入口，各深度 1；周期开始时为空的入口可接收新项。ALU IQ 的 op=38..45 投影到 mul_exec_t，其他项投影到 alu_exec_t；MEM IQ 投影到 mem_exec_t。
 
-PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。ALU IQ 的已有项可在收到当拍唤醒的边沿直接搬入 candidate_reg，下一拍才成为对外候选，此时 PRF 写入已完成；MEM IQ 候选只使用周期开始时已有项的已锁存就绪位。派遣与唤醒同拍时仍记录该唤醒，新项最早下一拍才参与候选选择。
+PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。两个 IQ 的已有项均可在收到当拍唤醒的边沿直接搬入 candidate_reg，下一拍才成为对外候选，此时 PRF 写入已完成。派遣与唤醒同拍时仍记录该唤醒，新项最早下一拍才参与候选选择。
 
 PRF 复位只需将 p1..p31 的初始架构值设零；p0 可直接用常量实现，其他数据不复位。checkpoint 恢复只处理被 squash 的目的和映射，不清 PRF 数据。
 
@@ -774,7 +774,7 @@ module iq_mem #(
 endmodule
 ```
 
-`iq_mem` 保留 16 项 memory uop 存储及每项的 valid、源操作数就绪状态；每拍按 ROB 年龄只输出一条最老的已就绪候选，供单个 AGU 使用。
+`iq_mem` 保留 16 项 memory uop 存储及每项的 valid、源操作数就绪状态；每拍按 ROB 年龄将一条最老的已就绪指令搬入单项 candidate_reg，下一拍输出给 `issue_sched`。搬入时释放 IQ 槽，背压时保持寄存项，`cand_take` 消费时可同拍补位；squash 当拍屏蔽年轻寄存项并只补入存活指令。端口和 `mem_iq_t` 布局不变。
 
 ### 13.10 `issue_sched`
 
