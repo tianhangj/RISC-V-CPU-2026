@@ -10,6 +10,7 @@ wb_arb.sv
 prf.sv
 rob.sv
 branch_ctrl.sv
+branch_predictor.sv
 fetch.sv
 icache.sv
 axi_bridge.sv

@@ -15,6 +15,9 @@ module fetch #(
     input logic clock, reset,
     input logic fetch_redirect_valid,
     input logic [FETCH_REDIRECT_BITS-1:0] fetch_redirect_payload,
+    output wire [31:0] lookup_pc,
+    input logic [DISPATCH_WIDTH-1:0] pred_taken,
+    input logic [DISPATCH_WIDTH*32-1:0] pred_npc,
     output logic ic_req_valid,
     input logic ic_req_ready,
     output logic [IC_REQ_BITS-1:0] ic_req_payload,
@@ -31,6 +34,7 @@ module fetch #(
     logic [1:0] state [0:FETCH_QUEUE_DEPTH-1]; // free, offer, waiting, ready
     logic [31:0] slot_pc [0:FETCH_QUEUE_DEPTH-1];
     logic [31:0] slot_npc [0:FETCH_QUEUE_DEPTH-1];
+    logic slot_taken [0:FETCH_QUEUE_DEPTH-1];
     logic [31:0] slot_inst [0:FETCH_QUEUE_DEPTH-1];
     logic [GEN_WIDTH-1:0] slot_gen [0:FETCH_QUEUE_DEPTH-1];
     logic [FIDW-1:0] head_q, tail_q;
@@ -48,6 +52,8 @@ module fetch #(
     logic [DCW-1:0] ready_count;
     logic [DISPATCH_WIDTH*FETCH_BITS-1:0] ready_packet;
     logic stop_ready;
+    logic stop_create;
+    logic [31:0] create_next_pc;
     integer create_count, credits_used, slot_index;
     wire [DCW-1:0] rsp_count = ic_rsp_payload[32*DISPATCH_WIDTH +: DCW];
     wire [FIDW-1:0] rsp_id = ic_rsp_payload[32*DISPATCH_WIDTH+DCW +: FIDW];
@@ -62,17 +68,26 @@ module fetch #(
     assign fetch_valid = out_valid && !fetch_redirect_valid;
     assign fetch_count = out_count;
     assign fetch_packet = out_packet;
+    assign lookup_pc = next_pc;
 
     always_comb begin
         credits_used = int'(outstanding_q) + (req_fire ? int'(offer_count) : 0)
             - (rsp_current ? int'(rsp_count) : 0);
         create_count = 0;
+        stop_create = 0;
+        create_next_pc = next_pc;
         if (!fetch_redirect_valid && (!offer_valid || req_fire)) begin
             for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                if (lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
+                if (!stop_create && lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
                     lane < LINE_WORDS-int'((next_pc >> 2) & (LINE_WORDS-1)) &&
-                    (next_pc[31:28] != 0 || lane < IFETCH_OUTSTANDING-credits_used))
+                    (next_pc[31:28] != 0 || lane < IFETCH_OUTSTANDING-credits_used)) begin
                     create_count = create_count + 1;
+                    create_next_pc = next_pc + 32'((lane+1)*4);
+                    if (next_pc[31:28] == 0 && pred_taken[lane]) begin
+                        create_next_pc = pred_npc[lane*32 +: 32];
+                        stop_create = 1;
+                    end
+                end
         end
         // Output owns a copy of its packet; its source slots are already free.
         ready_count = 0;
@@ -87,6 +102,7 @@ module fetch #(
                 ready_packet[lane*FETCH_BITS +: FETCH_BITS] =
                     {slot_pc[slot_index], slot_inst[slot_index], slot_npc[slot_index]};
                 ready_count = ready_count + 1'b1;
+                if (slot_taken[slot_index]) stop_ready = 1;
             end
         end
     end
@@ -145,7 +161,11 @@ module fetch #(
                 for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
                     if (lane < create_count) begin
                         slot_pc[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= next_pc + 32'(lane*4);
-                        slot_npc[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= next_pc + 32'((lane+1)*4);
+                        slot_npc[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <=
+                            (next_pc[31:28] == 0 && pred_taken[lane]) ?
+                            pred_npc[lane*32 +: 32] : next_pc + 32'((lane+1)*4);
+                        slot_taken[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <=
+                            next_pc[31:28] == 0 && pred_taken[lane];
                         slot_gen[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= fetch_gen;
                         if (next_pc[31:28] == 0)
                             state[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= 1;
@@ -161,7 +181,7 @@ module fetch #(
                     offer_pc <= next_pc;
                 end
                 tail_q <= tail_q + FIDW'(create_count);
-                next_pc <= next_pc + 32'(create_count*4);
+                next_pc <= create_next_pc;
             end
             if (load_output)
                 count_q <= QCW'(int'(count_q) + create_count - int'(ready_count));

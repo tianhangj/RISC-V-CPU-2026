@@ -8,7 +8,8 @@ module branch_ctrl #(
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer CCW = $clog2(CHECKPOINT_DEPTH + 1),
     parameter integer TAG_BITS = RW,
-    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 32,
+    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 98,
+    parameter integer BP_TRAIN_BITS = 66,
     parameter integer CP_ALLOC_BITS = CIDW + TAG_BITS + 32,
     parameter integer FETCH_REDIRECT_BITS = 32 + GEN_WIDTH
 ) (
@@ -23,6 +24,8 @@ module branch_ctrl #(
     input logic [31:0] front_redirect_pc,
     input logic [ISSUE_WIDTH-1:0] resolve_valid,
     input logic [ISSUE_WIDTH*RESOLVE_BITS-1:0] resolve_payload,
+    output logic [ISSUE_WIDTH-1:0] train_valid,
+    output logic [ISSUE_WIDTH*BP_TRAIN_BITS-1:0] train_payload,
     output logic [CHECKPOINT_DEPTH-1:0] cp_release_mask,
     output logic squash_valid,
     output logic [TAG_BITS-1:0] squash_tag,
@@ -38,8 +41,12 @@ module branch_ctrl #(
     logic [TAG_BITS-1:0] resolve_tag [0:ISSUE_WIDTH-1];
     logic [31:0] resolve_npc [0:ISSUE_WIDTH-1];
     logic [CHECKPOINT_DEPTH-1:0] preview_taken;
-    integer selected, candidate;
+    integer selected, candidate, train_rank;
     logic [31:0] redirect_pc;
+    logic [ISSUE_WIDTH-1:0] surviving;
+    function automatic [RW-1:0] age(input [TAG_BITS-1:0] tag);
+        age = tag - rob_head;
+    endfunction
     always_comb begin
         cp_free = 0;
         cp_alloc_id = 0;
@@ -64,13 +71,14 @@ module branch_ctrl #(
         redirect_pc = 0;
         cp_release_mask = 0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
-            resolve_cp[lane] = resolve_payload[lane*RESOLVE_BITS+32 +: CIDW];
-            resolve_tag[lane] = resolve_payload[lane*RESOLVE_BITS+32+CIDW +: TAG_BITS];
+            resolve_cp[lane] = resolve_payload[lane*RESOLVE_BITS+98 +: CIDW];
+            resolve_tag[lane] = resolve_payload[lane*RESOLVE_BITS+98+CIDW +: TAG_BITS];
             resolve_npc[lane] = resolve_payload[lane*RESOLVE_BITS +: 32];
-            matched[lane] = resolve_valid[lane] && cp_valid[resolve_cp[lane]] &&
+            matched[lane] = resolve_valid[lane] && resolve_cp[lane] < CHECKPOINT_DEPTH &&
+                cp_valid[resolve_cp[lane]] &&
                 (cp_tag[resolve_cp[lane]] == resolve_tag[lane]);
             if (matched[lane] && resolve_npc[lane] != cp_pred_npc[resolve_cp[lane]] &&
-                (!squash_valid || ((resolve_tag[lane] - rob_head) < (squash_tag - rob_head)))) begin
+                (!squash_valid || age(resolve_tag[lane]) < age(squash_tag))) begin
                 squash_valid = 1;
                 squash_tag = resolve_tag[lane];
                 restore_cp_id = resolve_cp[lane];
@@ -79,12 +87,32 @@ module branch_ctrl #(
         end
         for (int c = 0; c < CHECKPOINT_DEPTH; c = c + 1)
             if (squash_valid && cp_valid[c] &&
-                ((cp_tag[c] - rob_head) >= (squash_tag - rob_head)))
+                age(cp_tag[c]) >= age(squash_tag))
                 cp_release_mask[c] = 1;
-        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
-            if (matched[lane] &&
-                (!squash_valid || ((resolve_tag[lane] - rob_head) <= (squash_tag - rob_head))))
+        surviving = 0;
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
+            surviving[lane] = matched[lane] &&
+                (!squash_valid || age(resolve_tag[lane]) <= age(squash_tag));
+            if (surviving[lane])
                 cp_release_mask[resolve_cp[lane]] = 1;
+        end
+        // Compact events in ROB age order, independent of ALU lane order.
+        train_valid = 0;
+        train_payload = 0;
+        train_rank = 0;
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
+            train_rank = 0;
+            for (int other = 0; other < ISSUE_WIDTH; other = other + 1)
+                if (surviving[other] &&
+                    (age(resolve_tag[other]) < age(resolve_tag[lane]) ||
+                     (age(resolve_tag[other]) == age(resolve_tag[lane]) && other < lane)))
+                    train_rank = train_rank + 1;
+            if (surviving[lane]) begin
+                train_valid[train_rank] = 1;
+                train_payload[train_rank*BP_TRAIN_BITS +: BP_TRAIN_BITS] =
+                    resolve_payload[lane*RESOLVE_BITS+32 +: BP_TRAIN_BITS];
+            end
+        end
         fetch_redirect_valid = squash_valid || front_redirect_valid;
         if (!squash_valid) redirect_pc = front_redirect_pc;
         fetch_redirect_payload = {redirect_pc, (current_gen + 1'b1)};

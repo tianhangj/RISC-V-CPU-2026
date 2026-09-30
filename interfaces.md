@@ -1,21 +1,21 @@
 # RV32IM 指令缓存乱序核接口规范
 
-版本：v1.6.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.7.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
-- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction Cache；无 Data Cache、Store 转发、投机访存消歧或预测表；使用分支 checkpoint 和 16-bit generation。
-- 默认预测下一 PC 为 PC+4；一个取指包内按 PC+4 连续递增。分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
+- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction Cache；带 BTB + 2-bit BHT；无 Data Cache、Store 转发或投机访存消歧；使用分支 checkpoint 和 16-bit generation。
+- 默认启用全控制流预测；BTB 未命中时预测 PC+4，命中后条件分支使用 BHT 方向，JAL/JALR 使用 BTB 目标。一个取指包内按 PC+4 连续递增，并在首个预测 taken 处截断。分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
 - 正确路径指令受支持且访问合法；所有路径地址按访问宽度自然对齐。正确路径取指、Load 访问 RAM，Store 访问 RAM 或执行合法退出写。运行期间指令内存保持不变，不支持自修改代码或 Store 引起的 ICache 失效。无 CSR、特权陷入或精确异常状态。
 - Store 仅在 ROB 头部获得外部写授权。RAM Load 可越过地址已知且字节范围不重叠的旧 Store；非 RAM Load 在本地返回零。
 - 分支误预测只 squash 更年轻状态，保留该分支及更老工作；Fetch 立即切换 PC，Rename 从分支 checkpoint 恢复。桥继续完成旧事务，并在剩余容量内接收新路径请求。
-- 接口只携带接收方消费的字段，不提供调试、退休轨迹、断言、额外诊断性一致性检查、超时、重试或配置检查电路。不要求验证基础设施。
+- 接口只携带接收方消费的字段，不提供调试、退休轨迹、断言、额外诊断性一致性检查、超时、重试或配置检查电路。验证基础设施位于 tb，不增加 RTL 验证端口。
 
 ICache 命中时每拍最多取得 D 个 32 位指令字；每包不跨 Cache line。缺失采用单行填充，允许填充期间其他有效行命中；逐字填充与数据读取共享总线。错误路径可以占用内部资源和读取 RAM，但不能改变已提交寄存器、内存或外设状态，不能触发退出。队列满时背压；除第 12 节明确的 generation 不回绕假设外，正确性不依赖错误路径长度或误预测次数的上限。未知编码转 NOP、非 RAM 读门控、身份匹配、generation 匹配、Store 授权和 squash 是这一功能要求的一部分。
 
 | 模块 | 主责 | 职责 |
 |---|---|---|
-| student_top / fetch / icache / decode | A | 接线、多指令取指、指令缓存、译码 |
+| student_top / fetch / branch_predictor / icache / decode | A | 接线、多指令取指、分支预测、指令缓存、译码 |
 | rename / prf / rob / branch_ctrl | A | 重命名、寄存器、顺序提交、checkpoint/generation 恢复 |
 | iq_alu / iq_mem / issue_sched | B | 就绪跟踪、候选选择、操作数读取 |
 | alu × I / mul_div / wb_arb | B | 执行、完成仲裁、定向写回 |
@@ -40,6 +40,9 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | ICACHE_SIZE_BYTES | 4096 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
 | ICACHE_WAYS | 2 | 1/2/4 |
 | ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
+| BP_ENABLE | 1 | 0/1；关闭时顺序预测且停止训练 |
+| BTB_ENTRIES | 64 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
+| BHT_ENTRIES | 256 | 2 的幂，至少 2，独立 PC 字地址索引 |
 | LOAD_OUTSTANDING | 8 | 1–16，不大于 LQ_DEPTH |
 | AXI_RD_OUTSTANDING | 16 | 1–16，IF/LD 共享 |
 | CHECKPOINT_DEPTH（K） | 4 | 1..R，控制流派遣前分配 |
@@ -114,7 +117,8 @@ ROB 单独保存 2 位 `kind`：0=普通，1=控制流，2=Load，3=Store。ROB 
 | `mul_exec_t` | `rob:rob_tag_t, mul_op:3, pdst:PW, rs1_value:32, rs2_value:32` |
 | `mem_exec_t` | `rob:rob_tag_t, mem_op:3, mem_id:MIDW, base:32, imm:32, data:32` |
 | `result_t` | `rob:rob_tag_t, pdst:PW, value:32` |
-| `branch_resolve_t` | `rob:rob_tag_t, cp_id:CIDW, npc:32` |
+| `branch_resolve_t` | `rob:rob_tag_t, cp_id:CIDW, pc:32, is_conditional:1, taken:1, target:32, npc:32` |
+| `bp_train_t` | `pc:32, is_conditional:1, taken:1, target:32` |
 | `cp_alloc_t` | `cp_id:CIDW, rob:rob_tag_t, pred_npc:32` |
 | `fetch_redirect_t` | `target_pc:32, new_gen:GEN_WIDTH` |
 | `reg_commit_t` | `old_pdst:PW` |
@@ -153,7 +157,8 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 | `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 78 |
 | `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 107 |
 | `RESULT_BITS` | TAG_BITS + PW + 32 | 43 |
-| `RESOLVE_BITS` | TAG_BITS + CIDW + 32 | 39 |
+| `RESOLVE_BITS` | TAG_BITS + CIDW + 98 | 105 |
+| `BP_TRAIN_BITS` | 32 + 1 + 1 + 32 | 66 |
 | `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
 | `REG_COMMIT_BITS` | PW | 6 |
@@ -196,13 +201,13 @@ RAM 小端，地址范围为 `0x00000000..0x0fffffff`。退出操作是向 `0x80
 
 ### 5.1 多指令 Fetch
 
-Fetch 每拍预留至多 D 个槽，每槽保存 pc/pred_npc/generation；pred_npc=pc+4。包内 PC 按模 2^32 连续递增，每包不跨 Cache line；队列空闲空间、行尾剩余字数或取指额度不足时取更短前缀。已有 offer 被背压时不再创建新 offer 或重复推进 PC。可在旧 offer 接受同拍建立下一包。就绪指令复制进输出缓冲时即释放源槽并推进队首，释放槽在下一拍参与分配；F 统计队列槽容量，输出缓冲另容纳一个至多 D 条的包。
+Fetch 每拍预留至多 D 个槽，每槽保存 pc/pred_npc/pred_taken/generation；预测器从 next_pc 并行查询 D 个连续 PC，返回 pred_taken[D] 和 pred_npc[32×D]。先应用容量、行尾及额度限制，再截到首个预测 taken 的 lane（包含该指令）；next_pc 设为其目标，否则按 count×4 前进。预留槽时锁存预测，不受后续训练影响。非 RAM 槽强制顺序预测。包内 PC 按模 2^32 连续递增，每包不跨 Cache line；队列空闲空间、行尾剩余字数或取指额度不足时取更短前缀。已有 offer 被背压时不再创建新 offer 或重复推进 PC。可在旧 offer 接受同拍建立下一包。就绪指令复制进输出缓冲时即释放源槽并推进队首，释放槽在下一拍参与分配；F 统计队列槽容量，输出缓冲另容纳一个至多 D 条的包。
 
 RAM 内槽形成 ic_req 保持型请求，id 为首槽编号，count 为 1..D；lane k 的槽号为 (id+k) mod F。接受请求后按 count 增加 outstanding；ICache 为每个已接受包产生一次 ic_rsp 事件，含相同 gen/id/count 和按 lane 排列的指令字。Fetch 只消费当前 fetch_gen 的响应，每槽还必须处于 waiting 且 slot_gen 匹配，才写入 inst 并置 ready。当前路径响应按 count 归还额度；旧 generation 的包不写槽也不改变当前路径额度。RAM 外 PC 本地填 inst=0 并就绪，不占取指额度、不进入 ICache。
 
 fetch_redirect 当拍取消未接受 offer 和旧输出，边沿清旧槽及当前路径 outstanding，设置目标 PC，并将 fetch_gen 更新为 payload.new_gen。generation 只由 branch_ctrl 产生。ICache 同拍取消旧等待包与旧命中响应，不再为取消的包返回事件；物理填充读数由 ICache/桥独立维护，不受 Fetch 清零影响。下一拍可创建新路径槽。复位 PC=RESET_PC、fetch_gen=0。
 
-最老连续就绪的至多 D 个槽形成 fetch_packet，valid 时 count 为 1..D，整包接受。输出缓冲可在旧包接受的边沿装入后续就绪包，无输出空拍；复制后不再引用源槽，背压期间 count 和载荷保持。Decode 纯组合转换，count 原样传递；Rename 缓冲已接收的包。
+最老连续就绪的至多 D 个槽形成 fetch_packet；在锁存的首个 pred_taken 槽处截断输出，避免合并跳转前后两个路径，即使预测目标恰好等于 PC+4 也截断。预测跳转仅推进 next_pc，不清前端状态、不增加 generation。剩余槽在下一输出包消费。valid 时 count 为 1..D，整包接受。输出缓冲可在旧包接受的边沿装入后续就绪包，无输出空拍；复制后不再引用源槽，背压期间 count 和载荷保持。Decode 纯组合转换，count 原样传递；Rename 缓冲已接收的包。
 
 ### 5.2 Instruction Cache
 
@@ -219,6 +224,16 @@ fetch_redirect 当拍禁止取指包接收与响应，清命中响应状态及�
 Decode 生成已扩展的 imm：I/S/B/J 符号扩展，U 为 inst[31:12]<<12。LUI、AUIPC、JAL 不使用寄存器源；JALR、立即数运算和 Load 使用 rs1；条件分支、寄存器运算、Store、M 扩展使用 rs1/rs2。只有具有架构目的的操作保留 rd。op 决定 ALU 输入选择、访存大小和符号扩展，不重复传递这些控制位。
 
 不支持或未知的指令编码（包括零填充、CSR、FENCE、FENCE.I、ECALL、EBREAK）输出 op=NOP、rs1=rs2=rd=0，不申请目的物理寄存器或访存槽。正确路径不会出现这些编码；此处理使错误预测进入任意 RAM 内容后仍能继续执行和 squash。
+
+### 5.3 BTB + 2-bit BHT
+
+预测器为独立 branch_predictor；BTB/BHT 用寄存器实现组合查询，每拍支持 D 路查询和 I 路训练，不使用 SRAM、不增加查询流水级。BTB 以 PC[2 +: $clog2(BTB_ENTRIES)] 为索引，其余高位为完整 tag，保存 valid/tag/target/is_conditional；BHT 以 PC[2 +: $clog2(BHT_ENTRIES)] 为独立索引，无 tag、无全局历史。表容量不得超过 32 位 PC 字地址索引空间，BTB 需保留至少一位 tag。复位只清 BTB valid，将 BHT 置 01（弱不跳转），不清无效 BTB 载荷。
+
+BTB 未命中时 pred_taken=0、pred_npc=PC+4；命中条件分支时用 BHT 最高位判断 taken；命中 JAL/JALR 时无条件 taken。taken 时 pred_npc=BTB.target，即使 target=PC+4 也保持 pred_taken=1。非 RAM PC 或 BP_ENABLE=0 强制顺序预测；BP_ENABLE=0 不训练。无 RAS，不预译码冷启动 JAL，JALR 使用最近训练目标。
+
+ALU 条件分支显式输出比较结果 taken，target 始终为 PC+imm（包括不跳转），npc=taken?target:PC+4；JAL/JALR 的 is_conditional=0、taken=1，target/npc 为实际目标。不能从 npc!=PC+4 推导 taken。branch_ctrl 仅接受有效 checkpoint 的 cp_id/tag 匹配事件，以恢复前 rob_head 的 RW 位模差计算年龄；最老误预测边界及更老解析可训练，其余解析丢弃。训练事件是无 ready 事件，与 WB 无关，每次解析只产生一次。
+
+branch_ctrl 将存活事件压紧到 train lane 0..N-1，按 ROB 年龄从老到新输出。所有事件更新或直接替换对应 BTB 项；只有条件分支更新 BHT（taken 饱和加一、不跳转饱和减一）。同拍 BTB 索引冲突保留较年轻事件，同拍 BHT 索引冲突按事件顺序逐次饱和，不能仅取最后一次或合并成净增量。查询读取边沿前状态，无训练旁路；下一拍才能观察更新。执行后发生更老分支 squash 时，不回滚此前已写入的预测表；同拍被 squash 的年轻解析不写表。预测表不带 generation、不在 redirect 时清空。
 
 ## 6. Rename 与原子派遣
 
@@ -306,9 +321,9 @@ ALU 使用一项结果缓冲，接收请求后最早下一拍 result_valid；满
 | 同上 REM | 0 |
 | 正常有符号除法 | 商向零截断，非零余数符号与被除数一致 |
 
-每个 ALU 在控制流结果首次产生时输出一次 `resolve_valid/resolve_payload:branch_resolve_t`，携带 tag、cp_id 和真实 npc；结果缓冲保留一次性解析待发位。事件不等待 result_ready，下一拍清除解析待发位，即使普通结果继续背压也不重复解析。候选取自已锁存的执行结果/有效位，不组合依赖本次 squash 或 WB ready。
+每个 ALU 在控制流结果首次产生时输出一次 `resolve_valid/resolve_payload:branch_resolve_t`，携带 tag、cp_id、分支 PC、is_conditional、实际 taken、target 和真实 npc；结果缓冲保留一次性解析待发位。事件不等待 result_ready，下一拍清除解析待发位，即使普通结果继续背压也不重复解析。候选取自已锁存的执行结果/有效位，不组合依赖本次 squash 或 WB ready。
 
-branch_ctrl 同时接收 I 条解析事件，以有效 checkpoint 的 cp_id/tag 匹配并比较 pred_npc。在多条误预测中选择按恢复前 rob_head 计算的最老者；该分支及更老解析均生效，更年轻解析被 squash。匹配正确的存活分支只释放 checkpoint。
+branch_ctrl 同时接收 I 条解析事件，以有效 checkpoint 的 cp_id/tag 匹配并比较 pred_npc。在多条误预测中选择按恢复前 rob_head 计算的最老者；该分支及更老解析均生效，更年轻解析被 squash。匹配正确的存活分支释放 checkpoint，所有存活解析同时产生训练事件；更年轻解析不训练。
 
 IQ、发射入口、ALU/MULDIV、AGU、LSU 完成缓冲按第 12 节取消年轻项；较老运算及触发分支本身不被清空。长延迟乘除只有其身份比恢复边界年轻时才终止。解析不等于写回或退休：JAL/JALR 的结果可在恢复之后才写 PRF。
 
@@ -319,6 +334,8 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 此筛选依赖第 2 节既有的内部生命周期约定：每条指令只产生一次被接收的完成，接收后源清除该结果；被 squash 的内部工作在该边沿取消，之后不能重现旧结果。LSU 先按 LQ 完整身份过滤外部迟到响应，再产生结果。因此待仲裁结果均属于周期开始时活跃的 ROB 项，只需处理本拍 squash 的年龄边界。
 
 只在 result_valid 且未被本拍 squash 时参加 W 路轮询仲裁，每源每拍至多一个；指针移至最后接收源之后，没有存活接收则保持。被 squash 的有效结果直接 ready 接收并丢弃，不占 WB lane。被取消的 FU 也可直接撤销其年轻结果 valid。
+
+轮询指针只需 IDX(I+2) 位，复位为零；索引回绕使用比较与减法，避免把 32 位有符号取模综合进仲裁路径。端口、每 lane 的轮询顺序和指针更新时机不变。
 
 | 输出 | 接收方 | 内容 |
 |---|---|---|
@@ -411,6 +428,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 | 信号 | 生产者 → 消费者 | 含义 |
 |---|---|---|
+| train_valid[I]/train_payload[I] | branch_ctrl → branch_predictor | bp_train_t 事件，过滤并按 ROB 年龄从老到新排列 |
 | resolve_valid[I]/resolve_payload[I] | ALU → branch_ctrl | 一次性 branch_resolve_t 候选，独立于 WB |
 | squash_valid | branch_ctrl → ROB、Rename、IQ、issue_sched、FU、LSU、wb_arb | 执行期局部恢复事件 |
 | squash_tag | branch_ctrl → ROB、IQ、issue_sched、FU、LSU、wb_arb | 最老误预测分支身份，供年龄比较；Rename 只使用 restore_cp_id |
@@ -468,6 +486,9 @@ module student_top #(
     parameter integer ICACHE_SIZE_BYTES = 4096,
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
+    parameter integer BP_ENABLE = 1,
+    parameter integer BTB_ENTRIES = 64,
+    parameter integer BHT_ENTRIES = 256,
     parameter integer LOAD_OUTSTANDING = 8,
     parameter integer AXI_RD_OUTSTANDING = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -516,6 +537,9 @@ module fetch #(
     input logic clock, reset,
     input logic fetch_redirect_valid,
     input logic [FETCH_REDIRECT_BITS-1:0] fetch_redirect_payload,
+    output wire [31:0] lookup_pc,
+    input logic [DISPATCH_WIDTH-1:0] pred_taken,
+    input logic [DISPATCH_WIDTH*32-1:0] pred_npc,
     output logic ic_req_valid,
     input logic ic_req_ready,
     output logic [IC_REQ_BITS-1:0] ic_req_payload,
@@ -699,7 +723,8 @@ module branch_ctrl #(
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer CCW = $clog2(CHECKPOINT_DEPTH + 1),
     parameter integer TAG_BITS = RW,
-    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 32,
+    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 98,
+    parameter integer BP_TRAIN_BITS = 66,
     parameter integer CP_ALLOC_BITS = CIDW + TAG_BITS + 32,
     parameter integer FETCH_REDIRECT_BITS = 32 + GEN_WIDTH
 ) (
@@ -715,6 +740,8 @@ module branch_ctrl #(
     input logic [31:0] front_redirect_pc,
     input logic [ISSUE_WIDTH-1:0] resolve_valid,
     input logic [ISSUE_WIDTH*RESOLVE_BITS-1:0] resolve_payload, // branch_resolve_t
+    output logic [ISSUE_WIDTH-1:0] train_valid,
+    output logic [ISSUE_WIDTH*BP_TRAIN_BITS-1:0] train_payload, // bp_train_t, 从老到新
     output logic [CHECKPOINT_DEPTH-1:0] cp_release_mask,
     output logic squash_valid,
     output logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
@@ -867,7 +894,7 @@ module alu #(
     parameter integer TAG_BITS = RW,
     parameter integer ALU_EXEC_BITS = TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32,
-    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 32
+    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 98
 ) (
     input logic clock,
     input logic reset,
@@ -1097,8 +1124,31 @@ module icache #(
 endmodule
 ```
 
+### 13.17 `branch_predictor`
+
+```systemverilog
+module branch_predictor #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer ISSUE_WIDTH = 2,
+    parameter integer BP_ENABLE = 1,
+    parameter integer BTB_ENTRIES = 64,
+    parameter integer BHT_ENTRIES = 256,
+    parameter integer BP_TRAIN_BITS = 66
+) (
+    input logic clock, reset,
+    input logic [31:0] lookup_pc,
+    output wire [DISPATCH_WIDTH-1:0] pred_taken,
+    output wire [DISPATCH_WIDTH*32-1:0] pred_npc,
+    // Events are packed in increasing ROB age by branch_ctrl.
+    input logic [ISSUE_WIDTH-1:0] train_valid,
+    input logic [ISSUE_WIDTH*BP_TRAIN_BITS-1:0] train_payload
+);
+endmodule
+```
+
 ## 14. 顶层连接
 
+- Fetch.lookup_pc 接 branch_predictor.lookup_pc；预测器 pred_taken/pred_npc 返回 Fetch。branch_ctrl.train_valid/train_payload 接预测器，按 ROB 年龄压紧排序。BP_ENABLE/BTB_ENTRIES/BHT_ENTRIES 从 student_top 传入预测器。
 - Fetch→Decode→Rename 的包接口不携带 generation；Fetch 在入口按 `{gen,id}` 过滤取指响应，任何重定向都清除尚未派遣的旧前端数据。branch_ctrl.fetch_redirect_* 接 Fetch，valid 同时接 ICache；current_gen 由 branch_ctrl 维护并用于产生重定向目标。
 - Rename 的 disp_rob 接 ROB，disp_alu/disp_mem 分别接 IQ，disp_lsq 接 LSU。顶层按 disp_rob.kind 和统一 fire 产生 IQ/LSU 的有效 lane，squash 当拍禁止 fire；不要用前端纠正信号反向门控 fire。
 - branch_ctrl 的 checkpoint 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_valid/front_redirect_pc 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
@@ -1115,3 +1165,13 @@ endmodule
 `make test-icache` 运行 Cache/桥和 Fetch/Cache 定向测试，并以 SystemVerilog 2005 编译：覆盖宽度 1/2/4、相联度 1/2/4、行大小 16/32/64 B、单组 Cache、连续命中、填充/Load 竞争、背压、替换、跨行、槽号回绕、多次重定向以及命中/填充返回同拍重定向。还覆盖 IFETCH_OUTSTANDING 小于 D、输出阻塞、非 RAM PC 与 32 位 PC 回绕。
 
 集成验证使用 `make test`、`make perf`、`make synth`。Docker 工具链中可加 `APPIMAGE=` 使用容器原生工具；这些测试不增加 RTL 验证或调试端口。
+
+## 16. 分支预测验证
+
+`make test-branch` 用 SystemVerilog 2005 编译并运行 BTB/BHT 状态与冲突、ALU 分支元数据、checkpoint 训练过滤与年龄回绕、预测取指背压/截断/generation，WB 仲裁轮询/squash/指针回绕，以及宽度 1/2/4 的完整 CPU smoke 测试。`make test-icache` 保留顺序取指回归。完整功能及性能验证使用 `make test`、`make perf`，长程序可增大 MAX_CYCLES；代码变更必须通过 `make synth`。Docker 中使用 `APPIMAGE= VERILATOR=verilator` 运行测试；综合另指定 `YOSYS=yosys ABC=yosys-abc STA=sta ASAP7_LIB=/opt/asap7/lib`。
+
+`make branch-accuracy APPIMAGE= VERILATOR=verilator` 编译带仿真统计器的 CPU，默认逐个运行全部 correctness/perf 测试，校验程序输出并记录分支预测正确率。可设置 `Case=perf_qsort` 选择单个程序、`BP_WIDTH=1|2|4` 设置 I/D/W/C、`BP_ENABLE=0|1` 对比顺序预测；统计测试的周期上限为 `BP_MAX_CYCLES`（默认 100000000）。`BP_STATS_OUT` 默认 `build/branch-accuracy`，生成 `accuracy.csv`（每个测试及加权汇总）、`by_pc.csv`（每个静态分支 PC）、`accuracy.json`（配置、源码 SHA-256、周期、分组与逐 PC 计数）及 `logs/*.stderr` 原始日志。Python 入口为 `tb/branch_accuracy.py`，支持重复 `--case` 和 `--kind all|correctness|perf`。无事件的正确率为 N/A/JSON null，失败或不完整测试不计入汇总，脚本返回非零。
+
+统计口径为执行解析时 **预测 npc 与实际 npc 相等**，包含 BTB miss 的顺序预测，按条件分支/无条件跳转及实际 taken/not-taken 分组；跳转目标等于 PC+4 时也按 npc 比较，不推断方向正确率。计数只接受 `branch_ctrl.surviving` 的解析事件：checkpoint 身份匹配，且不年轻于本拍最老误预测分支。曾在更早周期解析、以后才被更老分支冲刷的事件保留，与执行期训练口径一致；这不是退休分支统计。无条件跳转组包含 JAL 和 JALR。汇总正确率为总正确次数/总预测次数，不平均各程序百分比。
+
+`tb/branch_stats_bind.sv` 仅在专用仿真构建时将 `tb/branch_stats_monitor.sv` 绑定到 branch_ctrl，通过内部 cp_pred_npc 和 resolve_payload 观测，不修改 CPU 的综合接口、不进入 `verilog/filelist.f`。`make test-branch-accuracy` 验证统计解析/CSV/JSON、零事件、加权汇总、复位、多 lane 同 PC、taken 到 PC+4、目标变化、checkpoint 复用、stale 解析、squash 与 ROB 回绕，并用完整 CPU 运行 8 次条件分支的已知循环，检查开启预测器时正确 6 次、关闭时正确 1 次，以及 JAL/JALR 冷启动目标。

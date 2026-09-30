@@ -33,6 +33,7 @@ module fetch_icache_case #(
     endfunction
     fetch #(.DISPATCH_WIDTH(D), .RESET_PC(28), .IFETCH_OUTSTANDING(OUTSTANDING)) frontend (
         .clock, .reset, .fetch_redirect_valid(redirect), .fetch_redirect_payload(redirect_payload),
+        .lookup_pc(), .pred_taken({D{1'b0}}), .pred_npc({D*32{1'b0}}),
         .ic_req_valid, .ic_req_ready, .ic_req_payload, .ic_rsp_valid, .ic_rsp_payload,
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet);
     icache #(.DISPATCH_WIDTH(D), .ICACHE_SIZE_BYTES(1024)) cache (

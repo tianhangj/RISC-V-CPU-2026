@@ -15,6 +15,9 @@ module student_top #(
     parameter integer ICACHE_SIZE_BYTES = 4096,
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
+    parameter integer BP_ENABLE = 1,
+    parameter integer BTB_ENTRIES = 64,
+    parameter integer BHT_ENTRIES = 256,
     parameter integer LOAD_OUTSTANDING = 8,
     parameter integer AXI_RD_OUTSTANDING = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -65,7 +68,8 @@ module student_top #(
     localparam integer MUL_EXEC_BITS = RW + 3 + PW + 64;
     localparam integer MEM_EXEC_BITS = RW + 3 + MIDW + 96;
     localparam integer RESULT_BITS = RW + PW + 32;
-    localparam integer RESOLVE_BITS = RW + CIDW + 32;
+    localparam integer RESOLVE_BITS = RW + CIDW + 98;
+    localparam integer BP_TRAIN_BITS = 66;
     localparam integer IF_ID_WIDTH = $clog2(ICACHE_LINE_BYTES/4);
     localparam integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32;
     localparam integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32;
@@ -130,6 +134,11 @@ module student_top #(
     logic [ISSUE_WIDTH-1:0] alu_result_valid, alu_result_ready, resolve_valid;
     logic [ISSUE_WIDTH*RESULT_BITS-1:0] alu_result_payload;
     logic [ISSUE_WIDTH*RESOLVE_BITS-1:0] resolve_payload;
+    wire [31:0] lookup_pc;
+    wire [DISPATCH_WIDTH-1:0] pred_taken;
+    wire [DISPATCH_WIDTH*32-1:0] pred_npc;
+    wire [ISSUE_WIDTH-1:0] train_valid;
+    wire [ISSUE_WIDTH*BP_TRAIN_BITS-1:0] train_payload;
     logic mul_result_valid, mul_result_ready, lsu_result_valid, lsu_result_ready;
     logic [RESULT_BITS-1:0] mul_result_payload, lsu_result_payload;
     logic [WB_WIDTH-1:0] done_valid, write_valid;
@@ -164,10 +173,14 @@ module student_top #(
     end
     assign disp_fire = disp_valid && disp_ready;
 
+    branch_predictor #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .ISSUE_WIDTH(ISSUE_WIDTH),
+        .BP_ENABLE(BP_ENABLE), .BTB_ENTRIES(BTB_ENTRIES), .BHT_ENTRIES(BHT_ENTRIES)) u_predictor (
+        .clock, .reset, .lookup_pc, .pred_taken, .pred_npc, .train_valid, .train_payload);
     fetch #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
         .IFETCH_OUTSTANDING(IFETCH_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH),
         .RESET_PC(RESET_PC), .ICACHE_LINE_BYTES(ICACHE_LINE_BYTES)) u_fetch (
         .clock, .reset, .fetch_redirect_valid, .fetch_redirect_payload,
+        .lookup_pc, .pred_taken, .pred_npc,
         .ic_req_valid, .ic_req_ready, .ic_req_payload, .ic_rsp_valid, .ic_rsp_payload,
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet);
     icache #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
@@ -205,6 +218,7 @@ module student_top #(
         .clock, .reset, .rob_head, .current_gen, .cp_free, .cp_alloc_id,
         .cp_alloc_valid, .cp_alloc_payload, .front_redirect_valid, .front_redirect_pc,
         .resolve_valid, .resolve_payload, .cp_release_mask,
+        .train_valid, .train_payload,
         .squash_valid, .squash_tag, .restore_cp_id,
         .fetch_redirect_valid, .fetch_redirect_payload);
     iq_alu #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),

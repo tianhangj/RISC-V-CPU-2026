@@ -31,7 +31,9 @@ module wb_arb #(
     logic [FU_SRC_COUNT-1:0] source_valid, source_ready, selected;
     logic [RESULT_BITS-1:0] source_payload [0:FU_SRC_COUNT-1];
     logic [FU_SRC_COUNT-1:0] discard;
-    integer cursor, next_cursor, candidate, chosen;
+    localparam integer CURSOR_BITS = (FU_SRC_COUNT > 1) ? $clog2(FU_SRC_COUNT) : 1;
+    logic [CURSOR_BITS-1:0] cursor, next_cursor;
+    integer candidate, chosen;
     always_comb begin
         for (int i = 0; i < ISSUE_WIDTH; i = i + 1) begin
             source_valid[i] = alu_result_valid[i];
@@ -55,7 +57,9 @@ module wb_arb #(
         for (int lane = 0; lane < WB_WIDTH; lane = lane + 1) begin
             chosen = -1;
             for (int offset = 0; offset < FU_SRC_COUNT; offset = offset + 1) begin
-                candidate = (next_cursor + offset) % FU_SRC_COUNT;
+                // cursor and offset are each below FU_SRC_COUNT; one subtraction wraps.
+                candidate = int'(next_cursor) + offset;
+                if (candidate >= FU_SRC_COUNT) candidate = candidate - FU_SRC_COUNT;
                 if (chosen < 0 && source_valid[candidate] && !discard[candidate] && !selected[candidate])
                     chosen = candidate;
             end
@@ -67,7 +71,7 @@ module wb_arb #(
                 write_pdst[lane*PW +: PW] = source_payload[chosen][32 +: PW];
                 write_value[lane*32 +: 32] = source_payload[chosen][31:0];
                 write_valid[lane] = (source_payload[chosen][32 +: PW] != 0);
-                next_cursor = (chosen + 1) % FU_SRC_COUNT;
+                next_cursor = (chosen == FU_SRC_COUNT-1) ? 0 : CURSOR_BITS'(chosen + 1);
             end
         end
         for (int i = 0; i < ISSUE_WIDTH; i = i + 1) alu_result_ready[i] = source_ready[i];

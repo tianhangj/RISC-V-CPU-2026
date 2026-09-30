@@ -8,7 +8,7 @@ module alu #(
     parameter integer TAG_BITS = RW,
     parameter integer ALU_EXEC_BITS = TAG_BITS + CIDW + 6 + PW + 128,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32,
-    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 32
+    parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 98
 ) (
     input logic clock, reset,
     input logic squash_valid,
@@ -37,7 +37,7 @@ module alu #(
     wire [TAG_BITS-1:0] held_rob = result_q[RESULT_BITS-1 -: TAG_BITS];
     wire held_young = squash_valid && ((held_rob - rob_head) > (squash_tag - rob_head));
     wire incoming_young = squash_valid && ((in_rob - rob_head) > (squash_tag - rob_head));
-    logic [31:0] value, next_pc;
+    logic [31:0] value, next_pc, target;
     logic control_flow, taken;
 
     always_comb begin
@@ -45,11 +45,15 @@ module alu #(
         next_pc = in_pc + 32'd4;
         control_flow = 0;
         taken = 0;
+        target = in_pc + in_imm;
         case (in_op)
             1: value = in_imm;
             2: value = in_pc + in_imm;
-            3: begin control_flow = 1; value = in_pc + 32'd4; next_pc = in_pc + in_imm; end
-            4: begin control_flow = 1; value = in_pc + 32'd4; next_pc = (a + in_imm) & 32'hfffffffe; end
+            3: begin control_flow = 1; taken = 1; value = in_pc + 32'd4; end
+            4: begin
+                control_flow = 1; taken = 1; value = in_pc + 32'd4;
+                target = (a + in_imm) & 32'hfffffffe;
+            end
             5: begin control_flow = 1; taken = (a == b); end
             6: begin control_flow = 1; taken = (a != b); end
             7: begin control_flow = 1; taken = ($signed(a) < $signed(b)); end
@@ -77,7 +81,7 @@ module alu #(
             29: value = a & b;
             default: value = 0;
         endcase
-        if (taken) next_pc = in_pc + in_imm;
+        if (taken) next_pc = target;
     end
 
     assign exec_ready = !occupied || result_ready;
@@ -96,7 +100,8 @@ module alu #(
             if (exec_valid && exec_ready && !incoming_young) begin
                 occupied <= 1;
                 result_q <= {in_rob, in_pdst, value};
-                resolve_q <= {in_rob, in_cp, next_pc};
+                resolve_q <= {in_rob, in_cp, in_pc, (in_op >= 5 && in_op <= 10),
+                    taken, target, next_pc};
                 resolve_pending <= control_flow;
             end
         end

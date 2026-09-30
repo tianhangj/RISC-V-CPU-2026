@@ -26,6 +26,10 @@ EXPECTED ?=
 Case ?=
 JOBS ?= 4
 MAX_CYCLES ?= 1000000
+BP_MAX_CYCLES ?= 100000000
+BP_WIDTH ?= 1
+BP_ENABLE ?= 1
+BP_STATS_OUT ?= $(BUILD)/branch-accuracy
 LATENCY ?= 10
 WAVE ?=
 LOG ?=
@@ -33,7 +37,7 @@ ifneq ($(strip $(BLACKBOXES)),)
 $(error BLACKBOXES has been removed; instantiate sram_fakeram instead)
 endif
 
-.PHONY: code help build run test test-icache perf synth clean
+.PHONY: code help build run test test-icache test-branch test-branch-accuracy branch-accuracy perf synth clean
 
 # OJ always builds RTL and collects ./code. SIM affects local run/test/perf only.
 code:
@@ -48,6 +52,10 @@ help:
 	@echo 'make run PROGRAM=program.bin EXPECTED=186 [WAVE=trace.vcd] [LOG=run.log]'
 	@echo 'make test [Case=correctness_add_to_100] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make test-icache [BUILD=build JOBS=4]'
+	@echo 'make test-branch [BUILD=build JOBS=4]'
+	@echo 'make test-branch-accuracy [BUILD=build JOBS=4]'
+	@echo 'make branch-accuracy [Case=perf_qsort BP_WIDTH=1 BP_ENABLE=1 BP_MAX_CYCLES=100000000]'
+	@echo '  CSV/JSON and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=2.0 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
@@ -78,6 +86,20 @@ test:
 test-icache:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_icache.py" --build "$(BUILD)/icache-tests" --jobs $(JOBS) \
 		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
+
+test-branch:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_branch.py" --build "$(BUILD)/branch-tests" --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
+
+test-branch-accuracy:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/test_branch_accuracy.py" --out "$(BUILD)/branch-accuracy-tests" --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
+
+branch-accuracy:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/branch_accuracy.py" --out "$(BP_STATS_OUT)" --filelist "$(FILELIST)" \
+		--testcases "$(TESTCASES)" --width $(BP_WIDTH) --bp-enable $(BP_ENABLE) \
+		--max-cycles $(BP_MAX_CYCLES) --latency $(LATENCY) --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",) $(if $(Case),--case "$(Case)",)
 
 perf:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/testcase.py" --kind perf --build "$(BUILD)" \

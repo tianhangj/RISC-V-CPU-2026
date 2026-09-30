@@ -14,6 +14,7 @@ module fetch_generation;
     fetch #(.DISPATCH_WIDTH(1), .FETCH_QUEUE_DEPTH(4), .IFETCH_OUTSTANDING(2)) dut (
         .clock, .reset,
         .fetch_redirect_valid(redirect), .fetch_redirect_payload(redirect_payload),
+        .lookup_pc(), .pred_taken(1'b0), .pred_npc(32'b0),
         .ic_req_valid, .ic_req_ready(1'b1), .ic_req_payload,
         .ic_rsp_valid, .ic_rsp_payload,
         .fetch_valid, .fetch_ready(1'b0), .fetch_count, .fetch_packet
