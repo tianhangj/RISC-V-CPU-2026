@@ -30,53 +30,75 @@ module iq_core #(
     for (genvar s = 0; s < DEPTH; s = s + 1) begin : g_flat_entry
         assign entry_flat[s*UOP_BITS +: UOP_BITS] = entry[s];
     end
+    localparam integer TREE_LEAVES = 2 ** $clog2(DEPTH);
+    localparam integer SLOT_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;
     logic [DEPTH-1:0] candidate_used, allocated;
-    integer cand_slot [0:ISSUE_WIDTH-1];
+    logic [DEPTH-1:0] cand_select [0:ISSUE_WIDTH-1];
+    logic [DEPTH-1:0] ready_candidate;
+    logic [RW-1:0] slot_age [0:DEPTH-1];
+    logic tree_valid [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
+    logic [RW-1:0] tree_age [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
+    logic [SLOT_W-1:0] tree_slot [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
     integer alloc_slot [0:DISPATCH_WIDTH-1];
     integer choice, free_temp;
-    logic [RW-1:0] best_age, age;
     logic [PW-1:0] ps1, ps2;
     logic [PW-1:0] select_ps1, select_ps2;
     logic select_ready1, select_ready2;
     logic w1, w2;
     always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_valid or
              wake_valid or wake_pdst) begin
+        for (int s = 0; s < DEPTH; s = s + 1) begin
+            slot_age[s] = entry[s][UOP_BITS-1 -: RW] - rob_head;
+            select_ps1 = entry[s][SRC2_LSB+PW +: PW];
+            select_ps2 = entry[s][SRC2_LSB +: PW];
+            select_ready1 = ready1_q[s];
+            select_ready2 = ready2_q[s];
+            if (BYPASS_WAKE != 0) begin
+                for (int w = 0; w < WB_WIDTH; w = w + 1) begin
+                    if (wake_valid[w] && select_ps1 == wake_pdst[w*PW +: PW])
+                        select_ready1 = 1;
+                    if (wake_valid[w] && select_ps2 == wake_pdst[w*PW +: PW])
+                        select_ready2 = 1;
+                end
+            end
+            ready_candidate[s] = valid_q[s] && select_ready1 && select_ready2;
+        end
         free_temp = 0;
         for (int s = 0; s < DEPTH; s = s + 1)
             if (!valid_q[s]) free_temp = free_temp + 1;
-        free_count = free_temp;
+        free_count = CW'(free_temp);
         candidate_used = 0;
         cand_valid = 0;
         cand_uop = 0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
-            choice = -1;
-            best_age = {RW{1'b1}};
+            cand_select[lane] = 0;
+            for (int leaf = 0; leaf < TREE_LEAVES; leaf = leaf + 1) begin
+                tree_valid[lane][TREE_LEAVES+leaf] =
+                    (leaf < DEPTH) ? ready_candidate[leaf] && !candidate_used[leaf] : 1'b0;
+                tree_age[lane][TREE_LEAVES+leaf] =
+                    (leaf < DEPTH) ? slot_age[leaf] : {RW{1'b1}};
+                tree_slot[lane][TREE_LEAVES+leaf] = SLOT_W'(leaf);
+            end
+            for (int node = TREE_LEAVES-1; node > 0; node = node - 1) begin
+                if (tree_valid[lane][2*node] &&
+                    (!tree_valid[lane][2*node+1] ||
+                     tree_age[lane][2*node] <= tree_age[lane][2*node+1])) begin
+                    tree_valid[lane][node] = 1;
+                    tree_age[lane][node] = tree_age[lane][2*node];
+                    tree_slot[lane][node] = tree_slot[lane][2*node];
+                end else begin
+                    tree_valid[lane][node] = tree_valid[lane][2*node+1];
+                    tree_age[lane][node] = tree_age[lane][2*node+1];
+                    tree_slot[lane][node] = tree_slot[lane][2*node+1];
+                end
+            end
+            cand_valid[lane] = tree_valid[lane][1];
             for (int s = 0; s < DEPTH; s = s + 1) begin
-                age = entry[s][UOP_BITS-1 -: RW] - rob_head;
-                select_ps1 = entry[s][SRC2_LSB+PW +: PW];
-                select_ps2 = entry[s][SRC2_LSB +: PW];
-                select_ready1 = ready1_q[s];
-                select_ready2 = ready2_q[s];
-                if (BYPASS_WAKE != 0) begin
-                    for (int w = 0; w < WB_WIDTH; w = w + 1) begin
-                        if (wake_valid[w] && select_ps1 == wake_pdst[w*PW +: PW])
-                            select_ready1 = 1;
-                        if (wake_valid[w] && select_ps2 == wake_pdst[w*PW +: PW])
-                            select_ready2 = 1;
-                    end
-                end
-                if (valid_q[s] && select_ready1 && select_ready2 && !candidate_used[s] &&
-                    (choice < 0 || age < best_age)) begin
-                    choice = s;
-                    best_age = age;
-                end
+                cand_select[lane][s] = tree_valid[lane][1] && tree_slot[lane][1] == SLOT_W'(s);
+                cand_uop[lane*UOP_BITS +: UOP_BITS] |=
+                    entry[s] & {UOP_BITS{cand_select[lane][s]}};
             end
-            cand_slot[lane] = choice;
-            if (choice >= 0) begin
-                cand_valid[lane] = 1;
-                cand_uop[lane*UOP_BITS +: UOP_BITS] = entry[choice];
-                candidate_used[choice] = 1;
-            end
+            candidate_used |= cand_select[lane];
         end
         allocated = 0;
         for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
@@ -106,9 +128,9 @@ module iq_core #(
                     end
                 end
             end
-            for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
-                if (cand_take[lane] && cand_slot[lane] >= 0)
-                    valid_q[cand_slot[lane]] <= 0;
+            for (int s = 0; s < DEPTH; s = s + 1)
+                for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
+                    if (cand_take[lane] && cand_select[lane][s]) valid_q[s] <= 0;
             for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
                 if (disp_valid[lane] && alloc_slot[lane] >= 0 && !squash_valid) begin
                     entry[alloc_slot[lane]] <= disp_uop[lane*UOP_BITS +: UOP_BITS];

@@ -46,19 +46,36 @@ module issue_sched #(
     logic [MUL_EXEC_BITS-1:0] mul_q;
     logic [MEM_EXEC_BITS-1:0] mem_q;
     logic [ISSUE_WIDTH-1:0] slot_used;
+    localparam integer CAND_COUNT = ISSUE_WIDTH + 1;
+    localparam integer TREE_LEAVES = 2 ** $clog2(CAND_COUNT);
+    localparam integer SRC_W = (CAND_COUNT > 1) ? $clog2(CAND_COUNT) : 1;
+    logic [RW-1:0] alu_age [0:ISSUE_WIDTH-1];
+    logic [RW-1:0] mem_age;
+    logic [ISSUE_WIDTH-1:0] alu_is_mul, alu_survives;
+    logic mem_survives;
+    logic [ISSUE_WIDTH-1:0] take_alu_select [0:ISSUE_WIDTH-1];
+    logic take_mem_select [0:ISSUE_WIDTH-1];
+    logic tree_valid [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
+    logic [RW-1:0] tree_age [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
+    logic [SRC_W-1:0] tree_src [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
     integer take_kind [0:ISSUE_WIDTH-1]; // 0 none, 1 ALU, 2 MUL, 3 MEM
-    integer take_src [0:ISSUE_WIDTH-1];
     integer take_slot [0:ISSUE_WIDTH-1];
-    integer choice_kind, choice_src, choice_slot, free_slot;
-    logic [RW-1:0] choice_age, age;
-    logic [5:0] op;
-    logic [TAG_BITS-1:0] tag;
-    logic [ALU_IQ_BITS-1:0] alu_item;
-    logic [MEM_IQ_BITS-1:0] mem_item;
-    logic [ALU_IQ_BITS-1:0] seq_alu_item;
+    integer free_slot;
+    logic selected_mul;
+    logic [ALU_IQ_BITS-1:0] selected_alu_item [0:ISSUE_WIDTH-1];
     logic [MEM_IQ_BITS-1:0] seq_mem_item;
 
     always_comb begin
+        for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
+            alu_age[s] = alu_cand_uop[s*ALU_IQ_BITS+ALU_IQ_BITS-1 -: RW] - rob_head;
+            alu_is_mul[s] = (alu_cand_uop[s*ALU_IQ_BITS+64+3*PW +: 6] >= 38 &&
+                             alu_cand_uop[s*ALU_IQ_BITS+64+3*PW +: 6] <= 45);
+            alu_survives[s] = alu_cand_valid[s] &&
+                (!squash_valid || alu_age[s] <= (squash_tag - rob_head));
+        end
+        mem_age = mem_cand_uop[MEM_IQ_BITS-1 -: RW] - rob_head;
+        mem_survives = mem_cand_valid &&
+            (!squash_valid || mem_age <= (squash_tag - rob_head));
         alu_cand_take = 0;
         mem_cand_take = 0;
         rd_addr = 0;
@@ -67,56 +84,63 @@ module issue_sched #(
         mem_used = 0;
         for (int k = 0; k < ISSUE_WIDTH; k = k + 1) begin
             take_kind[k] = 0;
-            take_src[k] = 0;
             take_slot[k] = 0;
-            choice_kind = 0;
-            choice_src = 0;
-            choice_slot = 0;
-            choice_age = {RW{1'b1}};
+            take_alu_select[k] = 0;
+            take_mem_select[k] = 0;
+            selected_alu_item[k] = 0;
+            selected_mul = 0;
             free_slot = -1;
             for (int s = 0; s < ISSUE_WIDTH; s = s + 1)
                 if (free_slot < 0 && !slot_used[s]) free_slot = s;
+            for (int leaf = 0; leaf < TREE_LEAVES; leaf = leaf + 1) begin
+                tree_valid[k][TREE_LEAVES+leaf] = 0;
+                tree_age[k][TREE_LEAVES+leaf] = {RW{1'b1}};
+                tree_src[k][TREE_LEAVES+leaf] = SRC_W'(leaf);
+            end
             for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
-                alu_item = alu_cand_uop[s*ALU_IQ_BITS +: ALU_IQ_BITS];
-                op = alu_item[64+3*PW +: 6];
-                tag = alu_item[ALU_IQ_BITS-1 -: TAG_BITS];
-                age = tag - rob_head;
-                if (alu_cand_valid[s] && !alu_cand_take[s] &&
-                    (!squash_valid || age <= (squash_tag - rob_head)) &&
-                    (((op >= 38 && op <= 45) && !mul_busy && !mul_used_alu) ||
-                     ((op < 38 || op > 45) && free_slot >= 0)) &&
-                    (choice_kind == 0 || age < choice_age)) begin
-                    choice_kind = (op >= 38 && op <= 45) ? 2 : 1;
-                    choice_src = s;
-                    choice_slot = free_slot;
-                    choice_age = age;
+                tree_valid[k][TREE_LEAVES+s] = alu_survives[s] && !alu_cand_take[s] &&
+                    (alu_is_mul[s] ? (!mul_busy && !mul_used_alu) : (free_slot >= 0));
+                tree_age[k][TREE_LEAVES+s] = alu_age[s];
+            end
+            tree_valid[k][TREE_LEAVES+ISSUE_WIDTH] =
+                mem_survives && !mem_cand_take && !mem_busy && !mem_used;
+            tree_age[k][TREE_LEAVES+ISSUE_WIDTH] = mem_age;
+            for (int node = TREE_LEAVES-1; node > 0; node = node - 1) begin
+                if (tree_valid[k][2*node] &&
+                    (!tree_valid[k][2*node+1] ||
+                     tree_age[k][2*node] <= tree_age[k][2*node+1])) begin
+                    tree_valid[k][node] = 1;
+                    tree_age[k][node] = tree_age[k][2*node];
+                    tree_src[k][node] = tree_src[k][2*node];
+                end else begin
+                    tree_valid[k][node] = tree_valid[k][2*node+1];
+                    tree_age[k][node] = tree_age[k][2*node+1];
+                    tree_src[k][node] = tree_src[k][2*node+1];
                 end
             end
-            mem_item = mem_cand_uop;
-            tag = mem_item[MEM_IQ_BITS-1 -: TAG_BITS];
-            age = tag - rob_head;
-            if (mem_cand_valid && !mem_cand_take && !mem_busy && !mem_used &&
-                (!squash_valid || age <= (squash_tag - rob_head)) &&
-                (choice_kind == 0 || age < choice_age)) begin
-                choice_kind = 3;
-                choice_src = 0;
-                choice_age = age;
+            for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
+                take_alu_select[k][s] = tree_valid[k][1] && tree_src[k][1] == SRC_W'(s);
+                selected_alu_item[k] |= alu_cand_uop[s*ALU_IQ_BITS +: ALU_IQ_BITS] &
+                    {ALU_IQ_BITS{take_alu_select[k][s]}};
+                selected_mul |= take_alu_select[k][s] && alu_is_mul[s];
             end
-            take_kind[k] = choice_kind;
-            take_src[k] = choice_src;
-            take_slot[k] = choice_slot;
-            if (choice_kind == 1 || choice_kind == 2) begin
-                alu_item = alu_cand_uop[choice_src*ALU_IQ_BITS +: ALU_IQ_BITS];
-                alu_cand_take[choice_src] = 1;
-                rd_addr[(2*k)*PW +: PW] = alu_item[64+PW +: PW];
-                rd_addr[(2*k+1)*PW +: PW] = alu_item[64 +: PW];
-                if (choice_kind == 1) slot_used[choice_slot] = 1;
-                else mul_used_alu = 1;
-            end else if (choice_kind == 3) begin
-                mem_item = mem_cand_uop;
+            take_mem_select[k] = tree_valid[k][1] &&
+                tree_src[k][1] == SRC_W'(ISSUE_WIDTH);
+            alu_cand_take |= take_alu_select[k];
+            if (|take_alu_select[k]) begin
+                take_kind[k] = selected_mul ? 2 : 1;
+                rd_addr[(2*k)*PW +: PW] = selected_alu_item[k][64+PW +: PW];
+                rd_addr[(2*k+1)*PW +: PW] = selected_alu_item[k][64 +: PW];
+                if (selected_mul) mul_used_alu = 1;
+                else begin
+                    take_slot[k] = free_slot;
+                    slot_used[free_slot] = 1;
+                end
+            end else if (take_mem_select[k]) begin
+                take_kind[k] = 3;
                 mem_cand_take = 1;
-                rd_addr[(2*k)*PW +: PW] = mem_item[32+PW +: PW];
-                rd_addr[(2*k+1)*PW +: PW] = mem_item[32 +: PW];
+                rd_addr[(2*k)*PW +: PW] = mem_cand_uop[32+PW +: PW];
+                rd_addr[(2*k+1)*PW +: PW] = mem_cand_uop[32 +: PW];
                 mem_used = 1;
             end
         end
@@ -153,20 +177,19 @@ module issue_sched #(
                              (squash_valid && !mem_exec_valid))) mem_busy <= 0;
             for (int k = 0; k < ISSUE_WIDTH; k = k + 1) begin
                 if (take_kind[k] == 1 || take_kind[k] == 2) begin
-                    seq_alu_item = alu_cand_uop[take_src[k]*ALU_IQ_BITS +: ALU_IQ_BITS];
                     if (take_kind[k] == 1) begin
                         alu_busy[take_slot[k]] <= 1;
                         alu_q[take_slot[k]] <= {
-                            seq_alu_item[ALU_IQ_BITS-1 -: TAG_BITS+CIDW+6+PW],
-                            seq_alu_item[63:0],
+                            selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS+CIDW+6+PW],
+                            selected_alu_item[k][63:0],
                             rd_data[(2*k)*32 +: 32],
                             rd_data[(2*k+1)*32 +: 32]};
                     end else begin
                         mul_busy <= 1;
                         mul_q <= {
-                            seq_alu_item[ALU_IQ_BITS-1 -: TAG_BITS],
-                            (seq_alu_item[64+3*PW +: 3] - 3'd6),
-                            seq_alu_item[64+2*PW +: PW],
+                            selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS],
+                            (selected_alu_item[k][64+3*PW +: 3] - 3'd6),
+                            selected_alu_item[k][64+2*PW +: PW],
                             rd_data[(2*k)*32 +: 32],
                             rd_data[(2*k+1)*32 +: 32]};
                     end
