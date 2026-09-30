@@ -5,7 +5,6 @@
 # core.sv
 decode.sv
 alu.sv
-mul_div_wallace_level.sv
 mul_div.sv
 wb_arb.sv
 prf.sv

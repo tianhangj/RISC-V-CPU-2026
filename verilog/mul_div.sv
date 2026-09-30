@@ -18,14 +18,11 @@ module mul_div #(
     input logic result_ready,
     output logic [RESULT_BITS-1:0] result_payload
 );
-    localparam logic [1:0] IDLE = 2'd0, MUL = 2'd1,
-                           DIV = 2'd2, RESULT = 2'd3;
+    localparam logic [1:0] IDLE = 2'd0, DIV = 2'd1, RESULT = 2'd2;
     logic [1:0] state;
     logic [TAG_BITS-1:0] tag_q;
     logic [PW-1:0] pdst_q;
-    logic [2:0] op_q;
-    logic [31:0] a_q, b_q;
-    logic [2:0] mul_step;
+    logic rem_q;
     logic [5:0] div_step;
     logic [31:0] divisor_q, dividend_shift_q, remainder_q;
     logic [30:0] quotient_q;
@@ -44,47 +41,17 @@ module mul_div #(
         (in_op[1] ? in_a : 32'hffffffff) : (in_op[1] ? 32'b0 : in_a);
     wire [31:0] in_abs_a = (in_signed_div && in_a[31]) ? -in_a : in_a;
     wire [31:0] in_abs_b = (in_signed_div && in_b[31]) ? -in_b : in_b;
+    // Correct the high half of the unsigned product for signed operands.
+    wire [63:0] in_product = in_a * in_b;
+    wire [31:0] in_product_high = in_product[63:32] -
+        (((in_op == 3'd1 || in_op == 3'd2) && in_a[31]) ? in_b : 32'b0) -
+        ((in_op == 3'd1 && in_b[31]) ? in_a : 32'b0);
+    wire [31:0] in_mul_value = (in_op == 3'd0) ?
+        in_product[31:0] : in_product_high;
     wire held_young = squash_valid &&
         ((tag_q - rob_head) > (squash_tag - rob_head));
     wire incoming_young = squash_valid &&
         ((in_tag - rob_head) > (squash_tag - rob_head));
-
-    // 34 terms include the two possible high-half sign corrections.
-    wire [34*64-1:0] partial_products;
-    wire [31:0] neg_a = -a_q;
-    wire [31:0] neg_b = -b_q;
-    for (genvar i = 0; i < 32; i = i + 1) begin : g_partial
-        assign partial_products[i*64 +: 64] =
-            {32'b0, (a_q & {32{b_q[i]}})} << i;
-    end
-    assign partial_products[32*64 +: 64] =
-        ((op_q == 3'd1 || op_q == 3'd2) && a_q[31]) ?
-        {neg_b, 32'b0} : 64'b0;
-    assign partial_products[33*64 +: 64] =
-        (op_q == 3'd1 && b_q[31]) ? {neg_a, 32'b0} : 64'b0;
-
-    wire [23*64-1:0] mul_l1;
-    wire [11*64-1:0] mul_l3;
-    wire [6*64-1:0] mul_l5;
-    wire [3*64-1:0] mul_l7;
-    wire [16*64-1:0] mul_next1;
-    wire [8*64-1:0] mul_next2;
-    wire [4*64-1:0] mul_next3;
-    wire [2*64-1:0] mul_next4;
-    logic [16*64-1:0] mul_stage1;
-    logic [8*64-1:0] mul_stage2;
-    logic [4*64-1:0] mul_stage3;
-    logic [2*64-1:0] mul_stage4;
-    mul_div_wallace_level #(.N(34)) u_l1 (partial_products, mul_l1);
-    mul_div_wallace_level #(.N(23)) u_l2 (mul_l1, mul_next1);
-    mul_div_wallace_level #(.N(16)) u_l3 (mul_stage1, mul_l3);
-    mul_div_wallace_level #(.N(11)) u_l4 (mul_l3, mul_next2);
-    mul_div_wallace_level #(.N(8)) u_l5 (mul_stage2, mul_l5);
-    mul_div_wallace_level #(.N(6)) u_l6 (mul_l5, mul_next3);
-    mul_div_wallace_level #(.N(4)) u_l7 (mul_stage3, mul_l7);
-    mul_div_wallace_level #(.N(3)) u_l8 (mul_l7, mul_next4);
-    wire [63:0] product = mul_stage4[63:0] + mul_stage4[127:64];
-    wire [31:0] mul_value = (op_q == 3'd0) ? product[31:0] : product[63:32];
 
     // One restoring-division bit is consumed on each DIV clock edge.
     wire [32:0] trial_remainder = {remainder_q, dividend_shift_q[31]};
@@ -95,7 +62,7 @@ module mul_div #(
     wire [31:0] signed_quotient = quotient_negative_q ? -next_quotient : next_quotient;
     wire [31:0] signed_remainder = dividend_negative_q ?
         -next_remainder : next_remainder;
-    wire [31:0] div_value = op_q[1] ? signed_remainder : signed_quotient;
+    wire [31:0] div_value = rem_q ? signed_remainder : signed_quotient;
 
     assign exec_ready = (state == IDLE) || (state == RESULT && result_ready);
     assign result_valid = (state == RESULT);
@@ -109,19 +76,6 @@ module mul_div #(
                 state <= IDLE;
             end else begin
                 case (state)
-                    MUL: begin
-                        case (mul_step)
-                            3'd0: mul_stage1 <= mul_next1;
-                            3'd1: mul_stage2 <= mul_next2;
-                            3'd2: mul_stage3 <= mul_next3;
-                            3'd3: mul_stage4 <= mul_next4;
-                            default: begin
-                                result_q <= {tag_q, pdst_q, mul_value};
-                                state <= RESULT;
-                            end
-                        endcase
-                        mul_step <= mul_step + 1'b1;
-                    end
                     DIV: begin
                         if (div_step == 6'd31) begin
                             result_q <= {tag_q, pdst_q, div_value};
@@ -140,12 +94,10 @@ module mul_div #(
             if (exec_valid && exec_ready && !incoming_young) begin
                 tag_q <= in_tag;
                 pdst_q <= in_pdst;
-                op_q <= in_op;
-                a_q <= in_a;
-                b_q <= in_b;
+                rem_q <= in_op[1];
                 if (in_op < 3'd4) begin
-                    mul_step <= 0;
-                    state <= MUL;
+                    result_q <= {in_tag, in_pdst, in_mul_value};
+                    state <= RESULT;
                 end else if (in_special) begin
                     result_q <= {in_tag, in_pdst, in_special_value};
                     state <= RESULT;

@@ -63,7 +63,7 @@ module mul_div_test;
         reg [31:0] expected_value;
         begin
             expected_value = golden(op, a, b);
-            latency = (op < 4) ? 5 :
+            latency = (op < 4) ? 0 :
                 ((b == 0 || ((op == 4 || op == 6) &&
                  a == 32'h80000000 && b == 32'hffffffff)) ? 0 : 32);
             @(negedge clock);
@@ -157,20 +157,18 @@ module mul_div_test;
         if (result_valid || !exec_ready) $fatal(1, "held result survived squash");
         @(negedge clock) squash_valid = 0;
 
-        // An older multiply continues across the same boundary.
+        // An older multiply result is retained across the same boundary.
         @(negedge clock);
         exec_valid = 1;
         exec_payload = {5'd1, 3'd1, 6'd34, 32'h80000000, 32'd2};
         @(posedge clock);
         #1 exec_valid = 0;
+        expect_result(5'd1, 6'd34, 32'hffffffff);
         @(negedge clock) squash_valid = 1;
         @(posedge clock);
         #1;
-        if (result_valid) $fatal(1, "older multiply completed too early");
-        @(negedge clock) squash_valid = 0;
-        repeat (4) @(posedge clock);
-        #1;
         expect_result(5'd1, 6'd34, 32'hffffffff);
+        @(negedge clock) squash_valid = 0;
 
         // Consume one result and launch the next request on the same edge.
         @(negedge clock);
@@ -183,9 +181,6 @@ module mul_div_test;
         #1;
         result_ready = 0;
         exec_valid = 0;
-        if (result_valid) $fatal(1, "old result remained after replacement");
-        repeat (5) @(posedge clock);
-        #1;
         expect_result(5'd2, 6'd36, 32'd42);
         @(negedge clock) result_ready = 1;
         @(posedge clock);
