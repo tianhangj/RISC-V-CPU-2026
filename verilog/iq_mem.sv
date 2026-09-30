@@ -1,5 +1,5 @@
 module iq_mem #(
-    parameter integer ISSUE_WIDTH = 2, DISPATCH_WIDTH = 2, WB_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
     parameter integer LQ_DEPTH = 8, SQ_DEPTH = 8,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
@@ -20,11 +20,11 @@ module iq_mem #(
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [MIQ_CW-1:0] mem_iq_free,
-    output logic [ISSUE_WIDTH-1:0] cand_valid,
-    output logic [ISSUE_WIDTH*MEM_IQ_BITS-1:0] cand_uop,
-    input logic [ISSUE_WIDTH-1:0] cand_take
+    output logic cand_valid,
+    output logic [MEM_IQ_BITS-1:0] cand_uop,
+    input logic cand_take
 );
-    iq_core #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
+    iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
         .RW(RW), .PW(PW), .CW(MIQ_CW)) core (.*,

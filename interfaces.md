@@ -739,7 +739,6 @@ endmodule
 
 ```systemverilog
 module iq_mem #(
-    parameter integer ISSUE_WIDTH = 2,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -768,12 +767,14 @@ module iq_mem #(
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [MIQ_CW-1:0] mem_iq_free,
-    output logic [ISSUE_WIDTH-1:0] cand_valid,
-    output logic [ISSUE_WIDTH*MEM_IQ_BITS-1:0] cand_uop, // mem_iq_t
-    input logic [ISSUE_WIDTH-1:0] cand_take
+    output logic cand_valid,
+    output logic [MEM_IQ_BITS-1:0] cand_uop, // mem_iq_t
+    input logic cand_take
 );
 endmodule
 ```
+
+`iq_mem` 保留 16 项 memory uop 存储及每项的 valid、源操作数就绪状态；每拍按 ROB 年龄只输出一条最老的已就绪候选，供单个 AGU 使用。
 
 ### 13.10 `issue_sched`
 
@@ -806,9 +807,9 @@ module issue_sched #(
     input logic [ISSUE_WIDTH-1:0] alu_cand_valid,
     input logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] alu_cand_uop, // alu_iq_t
     output logic [ISSUE_WIDTH-1:0] alu_cand_take,
-    input logic [ISSUE_WIDTH-1:0] mem_cand_valid,
-    input logic [ISSUE_WIDTH*MEM_IQ_BITS-1:0] mem_cand_uop, // mem_iq_t
-    output logic [ISSUE_WIDTH-1:0] mem_cand_take,
+    input logic mem_cand_valid,
+    input logic [MEM_IQ_BITS-1:0] mem_cand_uop, // mem_iq_t
+    output logic mem_cand_take,
     output logic [2*ISSUE_WIDTH*PW-1:0] rd_addr,
     input logic [2*ISSUE_WIDTH*32-1:0] rd_data,
     output logic [ISSUE_WIDTH-1:0] alu_exec_valid,

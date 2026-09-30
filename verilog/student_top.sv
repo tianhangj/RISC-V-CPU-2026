@@ -106,10 +106,10 @@ module student_top #(
     logic [COMMIT_WIDTH*PW-1:0] reg_commit_payload;
     logic st_start_valid, st_done_valid;
     logic [SIDW-1:0] st_start_id;
-    logic [ISSUE_WIDTH-1:0] alu_cand_valid, mem_cand_valid;
-    logic [ISSUE_WIDTH-1:0] alu_cand_take, mem_cand_take;
+    logic [ISSUE_WIDTH-1:0] alu_cand_valid, alu_cand_take;
+    logic mem_cand_valid, mem_cand_take;
     logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] alu_cand_uop;
-    logic [ISSUE_WIDTH*MEM_IQ_BITS-1:0] mem_cand_uop;
+    logic [MEM_IQ_BITS-1:0] mem_cand_uop;
     logic [2*ISSUE_WIDTH*PW-1:0] rd_addr;
     logic [2*ISSUE_WIDTH*32-1:0] rd_data;
     logic [ISSUE_WIDTH-1:0] alu_exec_valid, alu_exec_ready;
@@ -199,7 +199,7 @@ module student_top #(
         .disp_src1_ready, .disp_src2_ready, .wake_valid(write_valid), .wake_pdst(write_pdst),
         .alu_iq_free, .cand_valid(alu_cand_valid), .cand_uop(alu_cand_uop),
         .cand_take(alu_cand_take));
-    iq_mem #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
+    iq_mem #(.DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .IQ_MEM_DEPTH(IQ_MEM_DEPTH), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH)) u_iq_mem (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,

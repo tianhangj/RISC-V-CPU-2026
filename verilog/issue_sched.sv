@@ -24,9 +24,9 @@ module issue_sched #(
     input logic [ISSUE_WIDTH-1:0] alu_cand_valid,
     input logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] alu_cand_uop,
     output logic [ISSUE_WIDTH-1:0] alu_cand_take,
-    input logic [ISSUE_WIDTH-1:0] mem_cand_valid,
-    input logic [ISSUE_WIDTH*MEM_IQ_BITS-1:0] mem_cand_uop,
-    output logic [ISSUE_WIDTH-1:0] mem_cand_take,
+    input logic mem_cand_valid,
+    input logic [MEM_IQ_BITS-1:0] mem_cand_uop,
+    output logic mem_cand_take,
     output logic [2*ISSUE_WIDTH*PW-1:0] rd_addr,
     input logic [2*ISSUE_WIDTH*32-1:0] rd_data,
     output logic [ISSUE_WIDTH-1:0] alu_exec_valid,
@@ -92,17 +92,15 @@ module issue_sched #(
                     choice_age = age;
                 end
             end
-            for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
-                mem_item = mem_cand_uop[s*MEM_IQ_BITS +: MEM_IQ_BITS];
-                tag = mem_item[MEM_IQ_BITS-1 -: TAG_BITS];
-                age = tag - rob_head;
-                if (mem_cand_valid[s] && !mem_cand_take[s] && !mem_busy && !mem_used &&
-                    (!squash_valid || age <= (squash_tag - rob_head)) &&
-                    (choice_kind == 0 || age < choice_age)) begin
-                    choice_kind = 3;
-                    choice_src = s;
-                    choice_age = age;
-                end
+            mem_item = mem_cand_uop;
+            tag = mem_item[MEM_IQ_BITS-1 -: TAG_BITS];
+            age = tag - rob_head;
+            if (mem_cand_valid && !mem_cand_take && !mem_busy && !mem_used &&
+                (!squash_valid || age <= (squash_tag - rob_head)) &&
+                (choice_kind == 0 || age < choice_age)) begin
+                choice_kind = 3;
+                choice_src = 0;
+                choice_age = age;
             end
             take_kind[k] = choice_kind;
             take_src[k] = choice_src;
@@ -115,8 +113,8 @@ module issue_sched #(
                 if (choice_kind == 1) slot_used[choice_slot] = 1;
                 else mul_used_alu = 1;
             end else if (choice_kind == 3) begin
-                mem_item = mem_cand_uop[choice_src*MEM_IQ_BITS +: MEM_IQ_BITS];
-                mem_cand_take[choice_src] = 1;
+                mem_item = mem_cand_uop;
+                mem_cand_take = 1;
                 rd_addr[(2*k)*PW +: PW] = mem_item[32+PW +: PW];
                 rd_addr[(2*k+1)*PW +: PW] = mem_item[32 +: PW];
                 mem_used = 1;
@@ -173,7 +171,7 @@ module issue_sched #(
                             rd_data[(2*k+1)*32 +: 32]};
                     end
                 end else if (take_kind[k] == 3) begin
-                    seq_mem_item = mem_cand_uop[take_src[k]*MEM_IQ_BITS +: MEM_IQ_BITS];
+                    seq_mem_item = mem_cand_uop;
                     mem_busy <= 1;
                     mem_q <= {
                         seq_mem_item[MEM_IQ_BITS-1 -: TAG_BITS+3+MIDW],
