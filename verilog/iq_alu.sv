@@ -186,7 +186,7 @@ module iq_alu #(
     iq_core #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_ALU_DEPTH), .UOP_BITS(ALU_IQ_BITS), .SRC2_LSB(64),
-        .BYPASS_WAKE(1),
+        .BYPASS_WAKE(0),
         .RW(RW), .PW(PW), .CW(AIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,

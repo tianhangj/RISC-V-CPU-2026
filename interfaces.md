@@ -31,21 +31,21 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | DISPATCH_WIDTH（D） | 1 | 1/2/4 |
 | WB_WIDTH（W） | 1 | 1/2/4，每拍接受完成数 |
 | COMMIT_WIDTH（C） | 1 | 1/2/4 |
-| ROB_DEPTH（R） | 32 | 2 的幂，至少 8，且不小于 I/D/W/C |
-| PRF_SIZE（P） | 64 | 至少 32+D |
-| IQ_ALU_DEPTH / IQ_MEM_DEPTH | 16 / 16 | 2 的幂，至少 D |
-| LQ_DEPTH / SQ_DEPTH | 8 / 8 | 2 的幂，至少 D |
-| FETCH_QUEUE_DEPTH（F） | 16 | 2 的幂，至少 D |
-| IFETCH_OUTSTANDING | 8 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
-| ICACHE_SIZE_BYTES | 4096 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
+| ROB_DEPTH（R） | 16 | 2 的幂，至少 8，且不小于 I/D/W/C |
+| PRF_SIZE（P） | 48 | 至少 32+D |
+| IQ_ALU_DEPTH / IQ_MEM_DEPTH | 8 / 8 | 2 的幂，至少 D |
+| LQ_DEPTH / SQ_DEPTH | 4 / 4 | 2 的幂，至少 D |
+| FETCH_QUEUE_DEPTH（F） | 8 | 2 的幂，至少 D |
+| IFETCH_OUTSTANDING | 4 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
+| ICACHE_SIZE_BYTES | 1024 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
 | ICACHE_WAYS | 2 | 1/2/4 |
 | ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
 | BP_ENABLE | 1 | 0/1；关闭时顺序预测且停止训练 |
-| BTB_ENTRIES | 64 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
-| BHT_ENTRIES | 256 | 2 的幂，至少 2，独立 PC 字地址索引 |
-| LOAD_OUTSTANDING | 8 | 1–16，不大于 LQ_DEPTH |
+| BTB_ENTRIES | 16 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
+| BHT_ENTRIES | 64 | 2 的幂，至少 2，独立 PC 字地址索引 |
+| LOAD_OUTSTANDING | 4 | 1–16，不大于 LQ_DEPTH |
 | AXI_RD_OUTSTANDING | 16 | 1–16，IF/LD 共享 |
-| CHECKPOINT_DEPTH（K） | 4 | 1..R，控制流派遣前分配 |
+| CHECKPOINT_DEPTH（K） | 1 | 1..R，控制流派遣前分配 |
 | GEN_WIDTH | 16 | generation 位宽；在任何旧读事务存活期间不回绕碰撞 |
 | RESET_PC | 32'h00000000 | RAM 内，4 字节对齐 |
 
@@ -265,7 +265,7 @@ Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选�
 
 顶层根据 disp_rob.kind 统计 need_alu/need_mem/need_lq/need_sq；统一 fire 为 `disp_valid && disp_ready`，disp_ready 由 !squash_valid 及四类队列和 ROB 的容量满足条件产生。Checkpoint 候选已在形成 offer 时锁定；除了这个 offer 没有其他新资源申请者，分支恢复只消费既有预留编号并取消旧 offer，故背压期间候选不会被抢走。ROB 接收 disp_fire、disp_count 和 disp_rob；IQ 接收按类别与 fire 生成的逐 lane disp_valid；LSU 接收同样的访存 lane 事件。无效 lane 载荷不消费，不为 LSU 或 IQ 传递全核 count 和其他模块的投影。
 
-Rename 按包内顺序读取临时推测 RAT 的源映射；对非零 rd，先把更新前映射记录为该 lane 的 `old_pdst`，再分配最低编号空闲 pdst 并更新临时 RAT；无目的写 lane 的 `old_pdst=0`。后续 lane 读取更新后的映射。ps1/ps2=0 时源总是就绪。只有 fire 才更新推测 RAT、空闲表和分配状态。offer 中编号保持，源就绪侧带读取实时 ready 表并合入当拍唤醒；若源来自同包较老 lane 的新目的则未就绪。
+Rename 按包内顺序读取临时推测 RAT 的源映射；对非零 rd，先把更新前映射记录为该 lane 的 `old_pdst`，再分配最低编号空闲 pdst 并更新临时 RAT；无目的写 lane 的 `old_pdst=0`。后续 lane 读取更新后的映射。ps1/ps2=0 时源总是就绪。只有 fire 才更新推测 RAT、空闲表和分配状态。offer 保留的 checkpoint 编号仍处于空闲状态，对应 snapshot 可提前写入；每个镜像包含该分支及同包更老 lane 的 RAT 更新，在 fire 边沿发布有效位。提前写入不发布 cp_alloc_valid、不改变 snapshot_valid，也不回收或分配物理寄存器。offer 中编号保持，源就绪侧带读取实时 ready 表并合入当拍唤醒；若源来自同包较老 lane 的新目的则未就绪。
 
 所有 cp_alloc_valid 均包含统一 fire，非控制流 lane 无事件。cp_alloc_payload 的身份为 `{(rob_tail+lane) mod R}`；按包内控制流次序选 cp_alloc_id。资源不足时可派遣更短前缀，不能派遣没有 checkpoint 的分支。
 
@@ -297,7 +297,7 @@ IQ 仅接收自己的派遣投影及 `wake_valid[W]/wake_pdst[W]`，不接收结
 
 issue_sched 合并两组候选，按 ROB 年龄选择可容纳的最老项，同龄时按 ALU 候选槽号升序、再按 MEM 候选的顺序选择；后续发射 lane 排除先前 lane 已选的候选和已占用的执行入口。每拍总 take 数不超过 I。它保留 I 个 ALU 入口、一个 MULDIV 入口、一个 AGU 入口，各深度 1；周期开始时为空的入口可接收新项。ALU IQ 的 op=38..45 投影到 mul_exec_t，其他项投影到 alu_exec_t；MEM IQ 投影到 mem_exec_t。
 
-PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。每个读口按连续 8 项分 bank：地址低 3 位在各 bank 内译码选择数据，高位译码选择 bank；最后一个 bank 可不足 8 项。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。两个 IQ 的已有项均可在收到当拍唤醒的边沿直接搬入 candidate_reg，下一拍才成为对外候选，此时 PRF 写入已完成。派遣与唤醒同拍时仍记录该唤醒，新项最早下一拍才参与候选选择。
+PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。每个读口按连续 8 项分 bank：地址低 3 位在各 bank 内译码选择数据，高位译码选择 bank；最后一个 bank 可不足 8 项。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。两个 IQ 的已有项先在唤醒边沿更新源就绪位，再在下一上升沿搬入 candidate_reg，随后对外可见；候选选择不组合旁路当拍 wake，从而切断 WB→唤醒→年龄选择路径。此时 PRF 写入已完成。派遣与唤醒同拍时仍记录该唤醒，新项最早下一拍才参与候选选择。
 
 PRF 复位只需将 p1..p31 的初始架构值设零；p0 可直接用常量实现，其他数据不复位。checkpoint 恢复只处理被 squash 的目的和映射，不清 PRF 数据。
 
@@ -343,7 +343,7 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 | write_valid[W]、write_pdst[W]、write_value[W] | PRF | 存活完成且 pdst!=0 时写入 |
 | write_valid[W]、write_pdst[W] 的分支线 | Rename、两 IQ 的 wake 端口 | 仅物理目的和有效位，不增加结果数据 |
 
-完成、PRF 写与唤醒在同一接收边沿发生。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生完成或唤醒。
+wb_arb 新增整数参数 `PIPELINED`（默认 0，取 0/1）。独立模块默认维持组合广播；student_top 固定使用 PIPELINED=1，仲裁选中的完整 `{tag,pdst,value}` 先锁存一拍，下一拍广播。该级每拍接收 W 个结果，不增加输出 ready；在输出时再次按当前 squash 年龄边界过滤，避免暂存的年轻结果越过恢复。cursor 仍在 FU 结果被接收时前进，ALU 解析事件仍独立于该流水级。完成、PRF 写与唤醒在同一广播接收边沿发生。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生完成或唤醒。
 
 ## 9. ROB 与退休
 
@@ -475,23 +475,23 @@ module student_top #(
     parameter integer WB_WIDTH = 1,
     parameter integer COMMIT_WIDTH = 1,
 
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 64,
-    parameter integer IQ_ALU_DEPTH = 16,
-    parameter integer IQ_MEM_DEPTH = 16,
-    parameter integer LQ_DEPTH = 8,
-    parameter integer SQ_DEPTH = 8,
-    parameter integer FETCH_QUEUE_DEPTH = 16,
-    parameter integer IFETCH_OUTSTANDING = 8,
-    parameter integer ICACHE_SIZE_BYTES = 4096,
+    parameter integer ROB_DEPTH = 16,
+    parameter integer PRF_SIZE = 48,
+    parameter integer IQ_ALU_DEPTH = 8,
+    parameter integer IQ_MEM_DEPTH = 8,
+    parameter integer LQ_DEPTH = 4,
+    parameter integer SQ_DEPTH = 4,
+    parameter integer FETCH_QUEUE_DEPTH = 8,
+    parameter integer IFETCH_OUTSTANDING = 4,
+    parameter integer ICACHE_SIZE_BYTES = 1024,
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer BP_ENABLE = 1,
-    parameter integer BTB_ENTRIES = 64,
-    parameter integer BHT_ENTRIES = 256,
-    parameter integer LOAD_OUTSTANDING = 8,
+    parameter integer BTB_ENTRIES = 16,
+    parameter integer BHT_ENTRIES = 64,
+    parameter integer LOAD_OUTSTANDING = 4,
     parameter integer AXI_RD_OUTSTANDING = 16,
-    parameter integer CHECKPOINT_DEPTH = 4,
+    parameter integer CHECKPOINT_DEPTH = 1,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000
 ) (
@@ -944,6 +944,7 @@ endmodule
 
 ```systemverilog
 module wb_arb #(
+    parameter integer PIPELINED = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -1177,3 +1178,16 @@ endmodule
 统计口径为执行解析时 **预测 npc 与实际 npc 相等**，包含 BTB miss 的顺序预测，按条件分支/无条件跳转及实际 taken/not-taken 分组；跳转目标等于 PC+4 时也按 npc 比较，不推断方向正确率。计数只接受 `branch_ctrl.surviving` 的解析事件：checkpoint 身份匹配，且不年轻于本拍最老误预测分支。曾在更早周期解析、以后才被更老分支冲刷的事件保留，与执行期训练口径一致；这不是退休分支统计。无条件跳转组包含 JAL 和 JALR。汇总正确率为总正确次数/总预测次数，不平均各程序百分比。
 
 `tb/branch_stats_bind.sv` 仅在专用仿真构建时将 `tb/branch_stats_monitor.sv` 绑定到 branch_ctrl，通过内部 cp_pred_npc 和 resolve_payload 观测，不修改 CPU 的综合接口、不进入 `verilog/filelist.f`。`make test-branch-accuracy` 验证统计解析/CSV/JSON、零事件、加权汇总、复位、多 lane 同 PC、taken 到 PC+4、目标变化、checkpoint 复用、stale 解析、squash 与 ROB 回绕，并用完整 CPU 运行 8 次条件分支的已知循环，检查开启预测器时正确 6 次、关闭时正确 1 次，以及 JAL/JALR 冷启动目标。
+
+
+## 17. 300 MHz 时序优化与验证
+
+默认 student_top 使用本文件第 2 节的紧凑配置，降低队列、寄存器及预测表的读写扇出；各容量仍可参数化扩大，但更大配置需独立综合和测量 IPC。外部 AXI 及各包的字段定义保持，模块默认参数与顶层传入参数应分别理解。
+
+Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，只有正常创建事件才发布槽 state。计数覆盖的在用槽不会被提前写覆盖；redirect/reset 只清状态。队列读写逐槽译码。ICache tag 在每组内比较后合并 hit，BTB/BHT 也在条目内译码，避免数组二进制读选择让地址位驱动每个数据位；缓存命中、填充及预测接口的延迟保持。
+
+`make test-timing` 以 SystemVerilog 2005 运行写回流水级、checkpoint 预准备、多 lane 候选寄存器、年龄选择树、PRF 和乘除法定向回归，覆盖背压、同包多分支镜像、年轻目的回收、暂存结果冲刷、ROB 回绕、连续写回与复位。完整回归还需运行 `make test MAX_CYCLES=100000000`、`make perf`、`make test-branch`、`make test-icache`。
+
+综合使用既有 Yosys/ASAP7/OpenSTA 流程，不改变时序约束、库或统计口径。300 MHz 目标可显式设置 `make synth CLOCK_PERIOD_NS=3.333`；验收需同时检查 `estimated_fmax_mhz >= 300` 及目标 setup slack 非负，不能仅凭 make 返回码认定满足频率。该频率为无布线寄生的综合估计。
+
+本次默认配置实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；默认容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。该配置满足本次频率目标，IPC 需单独评估。

@@ -27,10 +27,30 @@ module branch_predictor #(
         wire [31:0] pc = lookup_pc + 32'(lane*4);
         wire [BIW-1:0] bi = pc[2 +: BIW];
         wire [HIW-1:0] hi = pc[2 +: HIW];
-        assign pred_taken[lane] = BP_ENABLE != 0 && pc[31:28] == 0 &&
-            btb_valid[bi] && btb_tag[bi] == pc[31 -: BTAG] &&
-            (!btb_conditional[bi] || bht[hi][1]);
-        assign pred_npc[lane*32 +: 32] = pred_taken[lane] ? btb_target[bi] : pc+32'd4;
+        // Decode each index once; avoid binary mux address bits driving every
+        // bit of the BTB tag/target arrays after memory lowering.
+        wire [BTB_ENTRIES-1:0] hit;
+        wire [31:0] target_word [0:BTB_ENTRIES-1];
+        wire [BHT_ENTRIES-1:0] counter_taken;
+        logic direction;
+        logic [31:0] target;
+        for (genvar entry = 0; entry < BHT_ENTRIES; entry = entry+1) begin : g_counter_read
+            assign counter_taken[entry] = (hi == HIW'(entry)) && bht[entry][1];
+        end
+        always_comb begin
+            direction = |counter_taken;
+            target = 0;
+            for (int entry = 0; entry < BTB_ENTRIES; entry = entry+1)
+                target = target | target_word[entry];
+        end
+        for (genvar entry = 0; entry < BTB_ENTRIES; entry = entry+1) begin : g_target_read
+            assign hit[entry] = (bi == BIW'(entry)) && btb_valid[entry] &&
+                btb_tag[entry] == pc[31 -: BTAG] &&
+                (!btb_conditional[entry] || direction);
+            assign target_word[entry] = btb_target[entry] & {32{hit[entry]}};
+        end
+        assign pred_taken[lane] = BP_ENABLE != 0 && pc[31:28] == 0 && (|hit);
+        assign pred_npc[lane*32 +: 32] = pred_taken[lane] ? target : pc+32'd4;
     end
 
     for (genvar entry = 0; entry < BTB_ENTRIES; entry = entry+1) begin : g_btb

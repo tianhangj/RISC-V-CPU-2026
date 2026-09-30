@@ -55,6 +55,28 @@ module fetch #(
     logic stop_create;
     logic [31:0] create_next_pc;
     integer create_count, credits_used, slot_index;
+    wire [FETCH_BITS-1:0] read_packet [0:DISPATCH_WIDTH-1];
+    wire [1:0] read_state [0:DISPATCH_WIDTH-1];
+    wire read_taken [0:DISPATCH_WIDTH-1];
+    for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_queue_read
+        logic [FETCH_BITS-1:0] packet;
+        logic [1:0] status;
+        logic taken;
+        always_comb begin
+            packet = 0;
+            status = 0;
+            taken = 0;
+            for (int slot = 0; slot < FETCH_QUEUE_DEPTH; slot = slot+1)
+                if (slot == (int'(head_q)+lane) % FETCH_QUEUE_DEPTH) begin
+                    packet = packet | {slot_pc[slot], slot_inst[slot], slot_npc[slot]};
+                    status = status | state[slot];
+                    taken = taken | slot_taken[slot];
+                end
+        end
+        assign read_packet[lane] = packet;
+        assign read_state[lane] = status;
+        assign read_taken[lane] = taken;
+    end
     wire [DCW-1:0] rsp_count = ic_rsp_payload[32*DISPATCH_WIDTH +: DCW];
     wire [FIDW-1:0] rsp_id = ic_rsp_payload[32*DISPATCH_WIDTH+DCW +: FIDW];
     wire [GEN_WIDTH-1:0] rsp_gen = ic_rsp_payload[32*DISPATCH_WIDTH+DCW+FIDW +: GEN_WIDTH];
@@ -76,7 +98,7 @@ module fetch #(
         create_count = 0;
         stop_create = 0;
         create_next_pc = next_pc;
-        if (!fetch_redirect_valid && (!offer_valid || req_fire)) begin
+        if (!offer_valid || req_fire) begin
             for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
                 if (!stop_create && lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
                     lane < LINE_WORDS-int'((next_pc >> 2) & (LINE_WORDS-1)) &&
@@ -96,13 +118,13 @@ module fetch #(
         slot_index = 0;
         for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
             slot_index = (int'(head_q) + lane) % FETCH_QUEUE_DEPTH;
-            if (lane >= int'(count_q) || state[slot_index] != 2'd3)
+            if (lane >= int'(count_q) || read_state[lane] != 2'd3)
                 stop_ready = 1;
             if (!stop_ready) begin
                 ready_packet[lane*FETCH_BITS +: FETCH_BITS] =
-                    {slot_pc[slot_index], slot_inst[slot_index], slot_npc[slot_index]};
+                    read_packet[lane];
                 ready_count = ready_count + 1'b1;
-                if (slot_taken[slot_index]) stop_ready = 1;
+                if (read_taken[lane]) stop_ready = 1;
             end
         end
     end
@@ -117,7 +139,7 @@ module fetch #(
             next_pc <= RESET_PC;
             offer_valid <= 0;
             out_valid <= 0;
-            for (int i = 0; i < FETCH_QUEUE_DEPTH; i = i + 1) state[i] <= 0;
+
         end else if (fetch_redirect_valid) begin
             head_q <= 0;
             tail_q <= 0;
@@ -127,27 +149,11 @@ module fetch #(
             out_valid <= 0;
             next_pc <= fetch_redirect_payload[GEN_WIDTH +: 32];
             fetch_gen <= fetch_redirect_payload[GEN_WIDTH-1:0];
-            for (int i = 0; i < FETCH_QUEUE_DEPTH; i = i + 1) state[i] <= 0;
+
         end else begin
             outstanding_q <= OCW'(credits_used);
-            if (req_fire) begin
-                offer_valid <= 0;
-                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                    if (lane < offer_count)
-                        state[(int'(offer_id)+lane) % FETCH_QUEUE_DEPTH] <= 2;
-            end
-            if (rsp_current) begin
-                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                    if (lane < rsp_count &&
-                        state[(int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH] == 2'd2 &&
-                        slot_gen[(int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH] == rsp_gen) begin
-                        slot_inst[(int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH] <= ic_rsp_payload[lane*32 +: 32];
-                        state[(int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH] <= 3;
-                    end
-            end
+            if (req_fire) offer_valid <= 0;
             if (load_output) begin
-                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                    if (lane < ready_count) state[(int'(head_q)+lane) % FETCH_QUEUE_DEPTH] <= 0;
                 head_q <= head_q + FIDW'(ready_count);
             end
             if (!out_valid || out_fire) begin
@@ -158,22 +164,6 @@ module fetch #(
                 end
             end
             if (create_count != 0) begin
-                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                    if (lane < create_count) begin
-                        slot_pc[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= next_pc + 32'(lane*4);
-                        slot_npc[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <=
-                            (next_pc[31:28] == 0 && pred_taken[lane]) ?
-                            pred_npc[lane*32 +: 32] : next_pc + 32'((lane+1)*4);
-                        slot_taken[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <=
-                            next_pc[31:28] == 0 && pred_taken[lane];
-                        slot_gen[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= fetch_gen;
-                        if (next_pc[31:28] == 0)
-                            state[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= 1;
-                        else begin
-                            slot_inst[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= 0;
-                            state[(int'(tail_q)+lane) % FETCH_QUEUE_DEPTH] <= 3;
-                        end
-                    end
                 if (next_pc[31:28] == 0) begin
                     offer_valid <= 1;
                     offer_id <= tail_q;
@@ -187,6 +177,49 @@ module fetch #(
                 count_q <= QCW'(int'(count_q) + create_count - int'(ready_count));
             else
                 count_q <= QCW'(int'(count_q) + create_count);
+        end
+    end
+    // Static destinations share one write decode per slot instead of a
+    // separate binary address mux for each stored bit.
+    for (genvar slot = 0; slot < FETCH_QUEUE_DEPTH; slot = slot+1) begin : g_queue_write
+        // Invalid slots may retain speculative data; only state needs reset
+        // and redirect gating. Prepare free tail slots regardless of credits
+        // or an older offer's handshake; create_count publishes their state.
+        // This keeps recovery and cache readiness off the wide data enables.
+        always_ff @(posedge clock) begin
+            for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin
+                if (rsp_current && lane < rsp_count &&
+                    slot == (int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH &&
+                    state[slot] == 2 && slot_gen[slot] == rsp_gen)
+                    slot_inst[slot] <= ic_rsp_payload[lane*32 +: 32];
+                if (lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
+                    slot == (int'(tail_q)+lane) % FETCH_QUEUE_DEPTH) begin
+                    slot_pc[slot] <= next_pc + 32'(lane*4);
+                    slot_npc[slot] <= (next_pc[31:28] == 0 && pred_taken[lane]) ?
+                        pred_npc[lane*32 +: 32] : next_pc + 32'((lane+1)*4);
+                    slot_taken[slot] <= next_pc[31:28] == 0 && pred_taken[lane];
+                    slot_gen[slot] <= fetch_gen;
+                    if (next_pc[31:28] != 0) slot_inst[slot] <= 0;
+                end
+            end
+            if (reset || fetch_redirect_valid) state[slot] <= 0;
+            else begin
+                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin
+                    if (req_fire && lane < offer_count &&
+                        slot == (int'(offer_id)+lane) % FETCH_QUEUE_DEPTH)
+                        state[slot] <= 2;
+                    if (rsp_current && lane < rsp_count &&
+                        slot == (int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH &&
+                        state[slot] == 2 && slot_gen[slot] == rsp_gen)
+                        state[slot] <= 3;
+                    if (load_output && lane < ready_count &&
+                        slot == (int'(head_q)+lane) % FETCH_QUEUE_DEPTH)
+                        state[slot] <= 0;
+                    if (lane < create_count &&
+                        slot == (int'(tail_q)+lane) % FETCH_QUEUE_DEPTH)
+                        state[slot] <= (next_pc[31:28] == 0) ? 2'd1 : 2'd3;
+                end
+            end
         end
     end
 endmodule

@@ -37,7 +37,7 @@ ifneq ($(strip $(BLACKBOXES)),)
 $(error BLACKBOXES has been removed; instantiate sram_fakeram instead)
 endif
 
-.PHONY: code help build run test test-icache test-branch test-branch-accuracy branch-accuracy perf synth clean
+.PHONY: code help build run test test-icache test-branch test-timing test-branch-accuracy branch-accuracy perf synth clean
 
 # OJ always builds RTL and collects ./code. SIM affects local run/test/perf only.
 code:
@@ -53,6 +53,7 @@ help:
 	@echo 'make test [Case=correctness_add_to_100] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make test-icache [BUILD=build JOBS=4]'
 	@echo 'make test-branch [BUILD=build JOBS=4]'
+	@echo 'make test-timing [BUILD=build JOBS=4]'
 	@echo 'make test-branch-accuracy [BUILD=build JOBS=4]'
 	@echo 'make branch-accuracy [Case=perf_qsort BP_WIDTH=1 BP_ENABLE=1 BP_MAX_CYCLES=100000000]'
 	@echo '  CSV/JSON and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
@@ -89,6 +90,10 @@ test-icache:
 
 test-branch:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_branch.py" --build "$(BUILD)/branch-tests" --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
+
+test-timing:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_timing.py" --build "$(BUILD)/timing-tests" --jobs $(JOBS) \
 		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
 
 test-branch-accuracy:

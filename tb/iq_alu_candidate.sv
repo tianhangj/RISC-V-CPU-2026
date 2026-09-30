@@ -113,8 +113,13 @@ module iq_alu_candidate_test;
         #1;
         expect_candidates(2'b00, 0, 0);
         tick();
+        expect_candidates(2'b00, 0, 0);
+        if (alu_iq_free !== 3'd3) $fatal(1, "wake must first update readiness");
+        @(negedge clock);
+        wake_valid = 0;
+        tick();
         expect_candidates(2'b01, 5'd6, 0);
-        if (alu_iq_free !== 3'd4) $fatal(1, "woken item did not transfer at wake edge");
+        if (alu_iq_free !== 3'd4) $fatal(1, "registered wake did not transfer");
 
         $display("iq_alu candidate stage PASS");
         $finish;

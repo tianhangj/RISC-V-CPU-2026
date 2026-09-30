@@ -1,4 +1,5 @@
 module wb_arb #(
+    parameter integer PIPELINED = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -28,6 +29,10 @@ module wb_arb #(
     output logic [WB_WIDTH*PW-1:0] write_pdst,
     output logic [WB_WIDTH*32-1:0] write_value
 );
+    logic [WB_WIDTH-1:0] selected_done_valid, selected_write_valid;
+    logic [WB_WIDTH*TAG_BITS-1:0] selected_done_tag;
+    logic [WB_WIDTH*PW-1:0] selected_write_pdst;
+    logic [WB_WIDTH*32-1:0] selected_write_value;
     logic [FU_SRC_COUNT-1:0] source_valid, source_ready, selected;
     logic [RESULT_BITS-1:0] source_payload [0:FU_SRC_COUNT-1];
     logic [FU_SRC_COUNT-1:0] discard;
@@ -48,11 +53,11 @@ module wb_arb #(
                 ((source_payload[i][RESULT_BITS-1 -: TAG_BITS] - rob_head) > (squash_tag - rob_head));
         source_ready = discard;
         selected = 0;
-        done_valid = 0;
-        done_tag = 0;
-        write_valid = 0;
-        write_pdst = 0;
-        write_value = 0;
+        selected_done_valid = 0;
+        selected_done_tag = 0;
+        selected_write_valid = 0;
+        selected_write_pdst = 0;
+        selected_write_value = 0;
         next_cursor = cursor;
         for (int lane = 0; lane < WB_WIDTH; lane = lane + 1) begin
             chosen = -1;
@@ -66,11 +71,11 @@ module wb_arb #(
             if (chosen >= 0) begin
                 selected[chosen] = 1;
                 source_ready[chosen] = 1;
-                done_valid[lane] = 1;
-                done_tag[lane*TAG_BITS +: TAG_BITS] = source_payload[chosen][RESULT_BITS-1 -: TAG_BITS];
-                write_pdst[lane*PW +: PW] = source_payload[chosen][32 +: PW];
-                write_value[lane*32 +: 32] = source_payload[chosen][31:0];
-                write_valid[lane] = (source_payload[chosen][32 +: PW] != 0);
+                selected_done_valid[lane] = 1;
+                selected_done_tag[lane*TAG_BITS +: TAG_BITS] = source_payload[chosen][RESULT_BITS-1 -: TAG_BITS];
+                selected_write_pdst[lane*PW +: PW] = source_payload[chosen][32 +: PW];
+                selected_write_value[lane*32 +: 32] = source_payload[chosen][31:0];
+                selected_write_valid[lane] = (source_payload[chosen][32 +: PW] != 0);
                 next_cursor = (chosen == FU_SRC_COUNT-1) ? 0 : CURSOR_BITS'(chosen + 1);
             end
         end
@@ -82,4 +87,38 @@ module wb_arb #(
         if (reset) cursor <= 0;
         else cursor <= next_cursor;
     end
+    generate
+        if (PIPELINED == 0) begin : g_direct
+            assign done_valid = selected_done_valid;
+            assign done_tag = selected_done_tag;
+            assign write_valid = selected_write_valid;
+            assign write_pdst = selected_write_pdst;
+            assign write_value = selected_write_value;
+        end else begin : g_pipeline
+            logic [WB_WIDTH-1:0] valid_q;
+            logic [WB_WIDTH*TAG_BITS-1:0] tag_q;
+            logic [WB_WIDTH*PW-1:0] pdst_q;
+            logic [WB_WIDTH*32-1:0] value_q;
+            always_ff @(posedge clock) begin
+                if (reset) valid_q <= 0;
+                else valid_q <= selected_done_valid;
+                tag_q <= selected_done_tag;
+                pdst_q <= selected_write_pdst;
+                value_q <= selected_write_value;
+            end
+            assign done_tag = tag_q;
+            assign write_pdst = pdst_q;
+            assign write_value = value_q;
+            for (genvar lane = 0; lane < WB_WIDTH; lane = lane+1) begin : g_lane
+                wire [TAG_BITS-1:0] tag = tag_q[lane*TAG_BITS +: TAG_BITS];
+                // A branch may resolve while a result waits in this stage.
+                // Apply the age boundary again before publishing completion.
+                assign done_valid[lane] = valid_q[lane] &&
+                    (!squash_valid || ((tag-rob_head) <= (squash_tag-rob_head)));
+                assign write_valid[lane] = done_valid[lane] &&
+                    pdst_q[lane*PW +: PW] != 0;
+            end
+        end
+    endgenerate
+
 endmodule

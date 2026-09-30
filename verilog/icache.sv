@@ -78,18 +78,55 @@ module icache #(
     wire [IF_ID_WIDTH-1:0] return_word = if_rsp_payload[32 +: IF_ID_WIDTH];
     wire [GEN_WIDTH-1:0] return_gen = if_rsp_payload[32+IF_ID_WIDTH +: GEN_WIDTH];
 
+    wire [SETS-1:0] set_select;
+    wire [ICACHE_WAYS-1:0] way_hit, way_valid;
+    wire [WAY_WIDTH-1:0] selected_replace;
+    logic [WAY_WIDTH-1:0] replacement;
+    for (genvar set_id = 0; set_id < SETS; set_id = set_id+1) begin : g_set_decode
+        assign set_select[set_id] = req_set == SET_WIDTH'(set_id);
+        always_ff @(posedge clock) begin
+            if (reset) replace_way[set_id] <= 0;
+            else if (write_line && fill_set == SET_WIDTH'(set_id))
+                replace_way[set_id] <= (fill_way == WAY_WIDTH'(ICACHE_WAYS-1)) ?
+                    0 : fill_way + 1'b1;
+        end
+        for (genvar way = 0; way < ICACHE_WAYS; way = way+1) begin : g_tag_write
+            always_ff @(posedge clock) begin
+                if (!reset && write_line && fill_set == SET_WIDTH'(set_id) &&
+                    fill_way == WAY_WIDTH'(way))
+                    tags[set_id*ICACHE_WAYS+way] <=
+                        TAG_WIDTH'(fill_addr >> (OFFSET_BITS+SET_BITS));
+            end
+        end
+    end
+    for (genvar way = 0; way < ICACHE_WAYS; way = way+1) begin : g_tag_read
+        wire [SETS-1:0] tag_hits, valids;
+        for (genvar set_id = 0; set_id < SETS; set_id = set_id+1) begin : g_match
+            assign valids[set_id] = set_select[set_id] && line_valid[set_id*ICACHE_WAYS+way];
+            assign tag_hits[set_id] = valids[set_id] &&
+                tags[set_id*ICACHE_WAYS+way] == req_tag;
+        end
+        assign way_valid[way] = |valids;
+        assign way_hit[way] = |tag_hits;
+    end
+    always_comb begin
+        replacement = 0;
+        for (int set_id = 0; set_id < SETS; set_id = set_id+1)
+            replacement = replacement | (replace_way[set_id] & {WAY_WIDTH{set_select[set_id]}});
+    end
+    assign selected_replace = replacement;
+
     always_comb begin
         hit_found = 0;
         hit_way = 0;
         invalid_found = 0;
-        victim_way = replace_way[req_set];
+        victim_way = selected_replace;
         for (int way = 0; way < ICACHE_WAYS; way = way + 1) begin
-            if (!hit_found && line_valid[int'(req_set)*ICACHE_WAYS+way] &&
-                tags[int'(req_set)*ICACHE_WAYS+way] == req_tag) begin
+            if (!hit_found && way_hit[way]) begin
                 hit_found = 1;
                 hit_way = WAY_WIDTH'(way);
             end
-            if (!invalid_found && !line_valid[int'(req_set)*ICACHE_WAYS+way]) begin
+            if (!invalid_found && !way_valid[way]) begin
                 invalid_found = 1;
                 victim_way = WAY_WIDTH'(way);
             end
@@ -132,7 +169,6 @@ module icache #(
             waiter_valid <= 0;
             sent_count <= 0;
             received_count <= 0;
-            for (int set_id = 0; set_id < SETS; set_id = set_id + 1) replace_way[set_id] <= 0;
         end else begin
             hit_pending <= hit_fire;
             if (hit_fire) begin
@@ -167,9 +203,7 @@ module icache #(
             end
             if (write_line) begin
                 fill_installed <= 1;
-                tags[int'(fill_set)*ICACHE_WAYS+int'(fill_way)] <= TAG_WIDTH'(fill_addr >> (OFFSET_BITS+SET_BITS));
                 line_valid[int'(fill_set)*ICACHE_WAYS+int'(fill_way)] <= 1;
-                replace_way[fill_set] <= (fill_way == WAY_WIDTH'(ICACHE_WAYS-1)) ? 0 : fill_way + 1'b1;
             end
             if (fill_busy && fill_installed && (!waiter_valid || !hit_pending)) begin
                 fill_busy <= 0;

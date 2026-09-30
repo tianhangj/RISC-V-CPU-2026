@@ -34,7 +34,7 @@ module iq_mem #(
     iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
-        .BYPASS_WAKE(1), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
+        .BYPASS_WAKE(0), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(mem_iq_free),

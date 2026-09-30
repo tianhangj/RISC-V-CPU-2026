@@ -253,6 +253,34 @@ module rename #(
         end
     end
 
+    for (genvar cp = 0; cp < CHECKPOINT_DEPTH; cp = cp+1) begin : g_snapshot_zero
+        assign snapshot[cp][0] = {PW{1'b0}};
+    end
+
+    // An offer reserves free checkpoint IDs. Prepare their images while it
+    // waits; dispatch publishes snapshot_valid and the controller identity.
+    // The image includes this branch's destination and all older lanes.
+    for (genvar r = 1; r < 32; r = r+1) begin : g_snapshot_register
+        logic [PW-1:0] image [0:DISPATCH_WIDTH-1];
+        logic [PW-1:0] mapping;
+        always_comb begin
+            mapping = rat[r];
+            for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin
+                if (offer_rd[lane] == r && offer_pdst[lane] != 0)
+                    mapping = offer_pdst[lane];
+                image[lane] = mapping;
+            end
+        end
+        for (genvar cp = 0; cp < CHECKPOINT_DEPTH; cp = cp+1) begin : g_checkpoint
+            always_ff @(posedge clock) begin
+                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1)
+                    if (offer_valid && lane < offer_count && offer_branch[lane] &&
+                        offer_cp_id[lane] == CIDW'(cp))
+                        snapshot[cp][r] <= image[lane];
+            end
+        end
+    end
+
     always_ff @(posedge clock) begin
         if (reset) begin
             buf_valid <= 0;
@@ -330,8 +358,6 @@ module rename #(
                             if (offer_branch[lane]) begin
                                 valid_work[offer_cp_id[lane]] = 1;
                                 young_work[offer_cp_id[lane]] = 0;
-                                for (int r = 1; r < 32; r = r + 1)
-                                    snapshot[offer_cp_id[lane]][r] <= rat_work[r];
                             end
                         end
                     end
