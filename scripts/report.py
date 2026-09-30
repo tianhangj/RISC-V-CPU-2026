@@ -31,7 +31,7 @@ def filename():
     return f"report@{int(now.timestamp())}({commit[:6]})_{slug}.txt", commit, subject
 
 
-def run_target(image, target, report):
+def run_target(image, target, report, build_dir):
     if target == "perf":
         make_args = [target, "MAX_CYCLES=10000000"]
     elif target == "test":
@@ -42,8 +42,9 @@ def run_target(image, target, report):
         "docker", "run", "--rm", "--network", "none",
         "--user", f"{os.getuid()}:{os.getgid()}",
         "--mount", f"type=bind,source={ROOT},target=/work",
+        "--mount", f"type=bind,source={build_dir},target=/build",
         "--workdir", "/work", image,
-        "make", *make_args, "APPIMAGE=",
+        "make", *make_args, "APPIMAGE=", "BUILD=/build", "SYNTH_OUT=/build/synth",
     ]
     report.write(f"\n===== make {' '.join(make_args)} =====\n")
     report.write("Docker command: " + shlex.join(command) + "\n\n")
@@ -121,11 +122,16 @@ def main():
     path = output_dir / name
     try:
         with path.open("x", encoding="utf-8") as report:
+            # Existing build/ files may belong to a different Docker user.
+            # Keep this report's artifacts in a fresh, caller-owned directory.
+            build_dir = output_dir / (path.stem + ".build")
+            build_dir.mkdir()
             report.write(f"Generated: {datetime.now().astimezone().isoformat(timespec='seconds')}\n")
             report.write(f"Commit: {commit}\nSubject: {subject}\n")
             report.write(f"Docker image: {args.image}\n")
+            report.write(f"Build directory: {build_dir}\n")
             report.write("Working tree: " + ("\n" + dirty if dirty else "clean") + "\n")
-            statuses = {target: run_target(args.image, target, report)
+            statuses = {target: run_target(args.image, target, report, build_dir)
                         for target in ("perf", "test", "synth")}
             report.write("\n===== Summary =====\n")
             for target, status in statuses.items():

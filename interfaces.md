@@ -1166,6 +1166,8 @@ endmodule
 
 集成验证使用 `make test`、`make perf`、`make synth`。Docker 工具链中可加 `APPIMAGE=` 使用容器原生工具；这些测试不增加 RTL 验证或调试端口。
 
+`python3 scripts/report.py` 使用本地 Docker 镜像（默认 `cpu2026:latest`，可用 `--image` 指定）依次运行 `make perf`、`make test`、`make synth`，在 `report/`（可用 `--output-dir` 指定）保存汇总报告。每份报告使用同目录下的 `<报告文件名去掉 .txt>.build/` 独立保存构建和综合产物；该目录挂载到容器 `/build`，显式设置 `BUILD=/build SYNTH_OUT=/build/synth`，避免复用其他用户拥有的仓库 `build/` 文件。容器使用调用者的 UID/GID，报告中记录宿主机构建目录，综合产物位于其 `synth/opt/` 子目录（配置 `MODE=diagnose` 时为 `synth/diagnose/`）。
+
 ## 16. 分支预测验证
 
 `make test-branch` 用 SystemVerilog 2005 编译并运行 BTB/BHT 状态与冲突、ALU 分支元数据、checkpoint 训练过滤与年龄回绕、预测取指背压/截断/generation，WB 仲裁轮询/squash/指针回绕，以及宽度 1/2/4 的完整 CPU smoke 测试。`make test-icache` 保留顺序取指回归。完整功能及性能验证使用 `make test`、`make perf`，长程序可增大 MAX_CYCLES；代码变更必须通过 `make synth`。Docker 中使用 `APPIMAGE= VERILATOR=verilator` 运行测试；综合另指定 `YOSYS=yosys ABC=yosys-abc STA=sta ASAP7_LIB=/opt/asap7/lib`。
