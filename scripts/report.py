@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run perf and synth in Docker and save their results in one report."""
+"""Run correctness tests, perf, and synth in Docker and save one report."""
 
 import argparse
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_CASE = re.compile(r"^\[([^\]]+)\]$")
+TEST_PASS = re.compile(r"^PASS(?: cycles=(\d+))?$")
 
 
 def git(*args):
@@ -29,7 +32,12 @@ def filename():
 
 
 def run_target(image, target, report):
-    make_args = [target, "MAX_CYCLES=10000000"] if target == "perf" else [target]
+    if target == "perf":
+        make_args = [target, "MAX_CYCLES=10000000"]
+    elif target == "test":
+        make_args = [target, "MAX_CYCLES=100000000"]
+    else:
+        make_args = [target]
     command = [
         "docker", "run", "--rm", "--network", "none",
         "--user", f"{os.getuid()}:{os.getgid()}",
@@ -42,20 +50,46 @@ def run_target(image, target, report):
     report.flush()
     print(f"Running make {target} in Docker...", file=sys.stderr, flush=True)
     try:
-        if target == "perf":
+        if target in ("perf", "test"):
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as log:
                 status = subprocess.run(command, cwd=ROOT, stdout=log,
                                         stderr=subprocess.STDOUT, check=False).returncode
                 log.seek(0)
                 if status == 0:
-                    for line in log:
-                        if line.lstrip().startswith("benchmark ") and "instructions" in line:
-                            report.write(line)
-                            shutil.copyfileobj(log, report)
-                            break
+                    if target == "perf":
+                        for line in log:
+                            if line.lstrip().startswith("benchmark ") and "instructions" in line:
+                                report.write(line)
+                                shutil.copyfileobj(log, report)
+                                break
+                        else:
+                            report.write("Benchmark table missing from successful make perf output.\n")
+                            status = 1
                     else:
-                        report.write("Benchmark table missing from successful make perf output.\n")
-                        status = 1
+                        cases = []
+                        passed = []
+                        current_case = None
+                        for line in log:
+                            line = line.strip()
+                            case_match = TEST_CASE.match(line)
+                            if case_match:
+                                current_case = case_match.group(1)
+                                cases.append(current_case)
+                                continue
+                            pass_match = TEST_PASS.match(line)
+                            if current_case and pass_match:
+                                passed.append((current_case, pass_match.group(1)))
+                                current_case = None
+                        if not cases or len(passed) != len(cases) or any(
+                                cycles is None for _, cycles in passed):
+                            report.write("Could not extract every passing testcase and cycle count; "
+                                         "make test output follows.\n")
+                            log.seek(0)
+                            shutil.copyfileobj(log, report)
+                            status = 1
+                        else:
+                            for case, cycles in passed:
+                                report.write(f"{case}: cycles={cycles} PASS\n")
                 else:
                     shutil.copyfileobj(log, report)
         else:
@@ -92,7 +126,7 @@ def main():
             report.write(f"Docker image: {args.image}\n")
             report.write("Working tree: " + ("\n" + dirty if dirty else "clean") + "\n")
             statuses = {target: run_target(args.image, target, report)
-                        for target in ("perf", "synth")}
+                        for target in ("perf", "test", "synth")}
             report.write("\n===== Summary =====\n")
             for target, status in statuses.items():
                 report.write(f"make {target}: {'PASS' if status == 0 else f'FAIL (exit {status})'}\n")
