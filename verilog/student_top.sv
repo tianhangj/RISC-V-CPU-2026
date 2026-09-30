@@ -1,8 +1,9 @@
 module student_top #(
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
-    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ISSUE_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer WB_WIDTH = 1,
+    parameter integer COMMIT_WIDTH = 1,
+    
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer IQ_ALU_DEPTH = 16,
