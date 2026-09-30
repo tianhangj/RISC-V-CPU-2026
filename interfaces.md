@@ -1,21 +1,21 @@
-# RV32IM 无缓存乱序核接口规范
+# RV32IM 指令缓存乱序核接口规范
 
-版本：v1.5.1。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.6.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
-- RV32IM、乱序发射、按序提交、物理寄存器重命名；无缓存、Store 转发、投机访存消歧或预测表；使用分支 checkpoint 和 16-bit generation。
-- 默认预测下一 PC 为 PC+4；接口允许预测到任意 4 字节对齐的 32 位地址，分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
-- 正确路径指令受支持且访问合法；所有路径地址按访问宽度自然对齐。正确路径取指、Load 访问 RAM，Store 访问 RAM 或执行合法退出写。无 CSR、特权陷入或精确异常状态。
+- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction Cache；无 Data Cache、Store 转发、投机访存消歧或预测表；使用分支 checkpoint 和 16-bit generation。
+- 默认预测下一 PC 为 PC+4；一个取指包内按 PC+4 连续递增。分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
+- 正确路径指令受支持且访问合法；所有路径地址按访问宽度自然对齐。正确路径取指、Load 访问 RAM，Store 访问 RAM 或执行合法退出写。运行期间指令内存保持不变，不支持自修改代码或 Store 引起的 ICache 失效。无 CSR、特权陷入或精确异常状态。
 - Store 仅在 ROB 头部获得外部写授权。RAM Load 可越过地址已知且字节范围不重叠的旧 Store；非 RAM Load 在本地返回零。
 - 分支误预测只 squash 更年轻状态，保留该分支及更老工作；Fetch 立即切换 PC，Rename 从分支 checkpoint 恢复。桥继续完成旧事务，并在剩余容量内接收新路径请求。
 - 接口只携带接收方消费的字段，不提供调试、退休轨迹、断言、额外诊断性一致性检查、超时、重试或配置检查电路。不要求验证基础设施。
 
-无缓存取指每拍最多取得一个 32 位指令字，与数据读取共享总线。错误路径可以占用内部资源和读取 RAM，但不能改变已提交寄存器、内存或外设状态，不能触发退出。队列满时背压；除第 12 节明确的 generation 不回绕假设外，正确性不依赖错误路径长度或误预测次数的上限。未知编码转 NOP、非 RAM 读门控、身份匹配、generation 匹配、Store 授权和 squash 是这一功能要求的一部分。
+ICache 命中时每拍最多取得 D 个 32 位指令字；每包不跨 Cache line。缺失采用单行填充，允许填充期间其他有效行命中；逐字填充与数据读取共享总线。错误路径可以占用内部资源和读取 RAM，但不能改变已提交寄存器、内存或外设状态，不能触发退出。队列满时背压；除第 12 节明确的 generation 不回绕假设外，正确性不依赖错误路径长度或误预测次数的上限。未知编码转 NOP、非 RAM 读门控、身份匹配、generation 匹配、Store 授权和 squash 是这一功能要求的一部分。
 
 | 模块 | 主责 | 职责 |
 |---|---|---|
-| student_top / fetch / decode | A | 接线、取指、译码 |
+| student_top / fetch / icache / decode | A | 接线、多指令取指、指令缓存、译码 |
 | rename / prf / rob / branch_ctrl | A | 重命名、寄存器、顺序提交、checkpoint/generation 恢复 |
 | iq_alu / iq_mem / issue_sched | B | 就绪跟踪、候选选择、操作数读取 |
 | alu × I / mul_div / wb_arb | B | 执行、完成仲裁、定向写回 |
@@ -27,16 +27,19 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 
 | 参数 | 默认 | 取值 |
 |---|---:|---|
-| ISSUE_WIDTH（I） | 2 | 1/2/4，全核每拍发射上限 |
-| DISPATCH_WIDTH（D） | 2 | 1/2/4 |
-| WB_WIDTH（W） | 2 | 1/2/4，每拍接受完成数 |
-| COMMIT_WIDTH（C） | 2 | 1/2/4 |
+| ISSUE_WIDTH（I） | 1 | 1/2/4，全核每拍发射上限 |
+| DISPATCH_WIDTH（D） | 1 | 1/2/4 |
+| WB_WIDTH（W） | 1 | 1/2/4，每拍接受完成数 |
+| COMMIT_WIDTH（C） | 1 | 1/2/4 |
 | ROB_DEPTH（R） | 32 | 2 的幂，至少 8，且不小于 I/D/W/C |
 | PRF_SIZE（P） | 64 | 至少 32+D |
 | IQ_ALU_DEPTH / IQ_MEM_DEPTH | 16 / 16 | 2 的幂，至少 D |
 | LQ_DEPTH / SQ_DEPTH | 8 / 8 | 2 的幂，至少 D |
 | FETCH_QUEUE_DEPTH（F） | 16 | 2 的幂，至少 D |
-| IFETCH_OUTSTANDING | 8 | 1–16，不大于 F |
+| IFETCH_OUTSTANDING | 8 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
+| ICACHE_SIZE_BYTES | 4096 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
+| ICACHE_WAYS | 2 | 1/2/4 |
+| ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
 | LOAD_OUTSTANDING | 8 | 1–16，不大于 LQ_DEPTH |
 | AXI_RD_OUTSTANDING | 16 | 1–16，IF/LD 共享 |
 | CHECKPOINT_DEPTH（K） | 4 | 1..R，控制流派遣前分配 |
@@ -45,13 +48,15 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 
 XLEN 固定 32，不作为参数。最多一笔未完成写。参数满足上表是集成前提，不增加参数合法性检查。
 
+Cache 组数 `S=ICACHE_SIZE_BYTES/(ICACHE_WAYS*ICACHE_LINE_BYTES)` 为 2 的幂，允许 S=1；行字数 `L=ICACHE_LINE_BYTES/4`。`IF_ID_WIDTH=IDX(L)` 用于填充字编号，`DCW=CNT(D)` 用于包 count。
+
 定义 `IDX(N)=max(1,ceil(log2(N)))`、`CNT(N)=max(1,ceil(log2(N+1)))`。`RW=IDX(R)`、`PW=IDX(P)`、`LIDW=IDX(LQ_DEPTH)`、`SIDW=IDX(SQ_DEPTH)`、`FIDW=IDX(F)`、`MIDW=max(LIDW,SIDW)`、`CIDW=IDX(K)`、`TAG_BITS=RW`（ROB tag 仅含 rob_id/index，不再携带 generation）。
 
 ROB 身份为 `rob_tag_t={index}`（仅 rob_id/index）。活跃项年龄为 `(index-head) mod R`。ROB 用占用计数区分满/空。generation 不进入 ROB 身份，也不用于判断后端指令失效。
 
-正常退休后的 ROB 槽、完成后的 LQ 槽可在下一拍复用；squash 后的槽也可在下一拍复用。旧读返回仍带原 generation，`{gen,id}` 不匹配的数据只归还事务额度、不写新槽。generation 按模 `2^GEN_WIDTH` 自增，不显式回收；约定从任一读请求被桥接收到其响应返回期间不会发生回绕碰撞（见第 12 节）。
+正常退休后的 ROB 槽、完成后的 LQ 槽可在下一拍复用；squash 后的槽也可在下一拍复用。旧 Load 返回仍带原 generation，`{gen,id}` 不匹配的数据只归还事务额度、不写新槽。旧取指包在 redirect 时由 ICache 取消，物理填充继续完成。generation 按模 `2^GEN_WIDTH` 自增，不显式回收；约定从任一读请求被桥接收到其响应返回期间不会发生回绕碰撞（见第 12 节）。
 
-CPU 内部在途请求、运算和结果的身份均由其活跃 ROB 项覆盖。被 squash 的内部工作在该边沿取消，不能在后续周期重新产生旧结果；已经有效的失效结果同拍取消或被 WB 接收丢弃。只有桥内已接受读可以在 ROB 项失效后继续存在，其 generation 由桥独立保持，用于 `{gen,id}` 匹配。这样编号回收不遗漏执行缓冲中的引用。
+CPU 内部在途请求、运算和结果的身份均由其活跃 ROB 项覆盖。被 squash 的内部工作在该边沿取消，不能在后续周期重新产生旧结果；已经有效的失效结果同拍取消或被 WB 接收丢弃。只有 ICache 物理填充及桥内已接受读可以在相关路径失效后继续存在，其身份由 ICache/桥独立保持，用于 `{gen,id}` 匹配。这样编号回收不遗漏执行缓冲中的引用。
 
 时序模块使用 clock 上升沿及高电平同步 reset。复位只初始化有效位、指针、计数和必要架构状态，不清空无效载荷。
 
@@ -113,8 +118,10 @@ ROB 单独保存 2 位 `kind`：0=普通，1=控制流，2=Load，3=Store。ROB 
 | `cp_alloc_t` | `cp_id:CIDW, rob:rob_tag_t, pred_npc:32` |
 | `fetch_redirect_t` | `target_pc:32, new_gen:GEN_WIDTH` |
 | `reg_commit_t` | `old_pdst:PW` |
-| `if_req_t` | `gen:GEN_WIDTH, id:FIDW, addr:32` |
-| `if_rsp_t` | `gen:GEN_WIDTH, id:FIDW, data:32` |
+| `ic_req_t` | `gen:GEN_WIDTH, id:FIDW, count:DCW, addr:32` |
+| `ic_rsp_t` | `gen:GEN_WIDTH, id:FIDW, count:DCW, inst:32×D` |
+| `if_req_t` | `gen:GEN_WIDTH, id:IF_ID_WIDTH, addr:32` |
+| `if_rsp_t` | `gen:GEN_WIDTH, id:IF_ID_WIDTH, data:32` |
 | `ld_req_t` | `gen:GEN_WIDTH, id:LIDW, addr:32` |
 | `ld_rsp_t` | `gen:GEN_WIDTH, id:LIDW, data:32` |
 | `write_req_t` | `addr:32, data:32, strb:4` |
@@ -127,9 +134,11 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 
 `mem_id` 是 LQ/SQ 槽号的联合字段，由 is_store 或 mem_op 限定，不足位补零；槽号 0 合法。ROB 只保存 Store 的 sq_id。Load 结果被接收后释放 LQ，不向 ROB 传递 LQ 槽号。
 
-派遣包内不携带 generation；后端投影直接包含完整 rob_tag_t。前端数据包不重复携带 generation：Fetch 自己按 `{gen,id}` 筛选取指响应，任何重定向都清空未派遣的旧前端状态。
+派遣包内不携带 generation；后端投影直接包含完整 rob_tag_t。前端数据包不重复携带 generation：ICache 在 redirect 时取消旧包，Fetch 自己按 `{gen,id}` 筛选包响应，任何重定向都清空未派遣的旧前端状态。
 
 ### 3.3 位宽
+
+下表位数沿用 D=I=W=C=2 的配置示例；顶层当前默认宽度为 1。
 
 | 常量 | 公式 | 默认位数 |
 |---|---|---:|
@@ -148,8 +157,10 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 | `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
 | `REG_COMMIT_BITS` | PW | 6 |
-| `IF_REQ_BITS` | GEN_WIDTH + FIDW + 32 | 52 |
-| `IF_RSP_BITS` | GEN_WIDTH + FIDW + 32 | 52 |
+| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 54 |
+| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 86 |
+| `IF_REQ_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
+| `IF_RSP_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
 | `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
 | `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
 | `WRITE_REQ_BITS` | 32 + 32 + 4 | 68 |
@@ -183,13 +194,27 @@ RAM 小端，地址范围为 `0x00000000..0x0fffffff`。退出操作是向 `0x80
 
 ## 5. Fetch 与 Decode
 
-Fetch 预留一个槽后保存 pc/pred_npc，将下一个取指 PC 更新为所采用的 pred_npc。默认选择 PC+4；任意其他对齐预测值必须同时用于记录和实际取指流。每拍至多创建一个槽，已有请求 offer 被背压时不再创建新 offer 或重复推进 PC。PC 加法按模 2^32 执行。
+### 5.1 多指令 Fetch
 
-RAM 内槽发送携带 `{gen,id}` 的 if_req 保持型请求，桥接受后增加未完成读数。if_rsp 是无 ready 事件，每次事件都减少计数；只有 `gen` 等于该槽发出时锁存的 generation、对应 slot 仍等待该响应且当拍没有 fetch_redirect 时才写槽，否则只归还额度并丢弃数据。RAM 外 PC 不发 AR，原槽填 inst=0 并标记就绪，不占读额度。
+Fetch 每拍预留至多 D 个槽，每槽保存 pc/pred_npc/generation；pred_npc=pc+4。包内 PC 按模 2^32 连续递增，每包不跨 Cache line；队列空闲空间、行尾剩余字数或取指额度不足时取更短前缀。已有 offer 被背压时不再创建新 offer 或重复推进 PC。可在旧 offer 接受同拍建立下一包。就绪指令复制进输出缓冲时即释放源槽并推进队首，释放槽在下一拍参与分配；F 统计队列槽容量，输出缓冲另容纳一个至多 D 条的包。
 
-fetch_redirect 当拍取消未被桥接受的 offer 和旧输出包，边沿清旧槽、设置目标 PC，并把本地 `fetch_gen` 更新为 payload 中的 `new_gen`；新槽发出时锁存该 `fetch_gen`。generation 只由 branch_ctrl 产生，Fetch 不自行执行 `current_gen+1`。未完成读计数不清零。下一拍即可创建新路径槽，不等待旧响应；IFETCH_OUTSTANDING 仍统计全部已接受未返回请求，旧事务占用额度时新请求正常背压。复位 PC=RESET_PC、fetch_gen=0。
+RAM 内槽形成 ic_req 保持型请求，id 为首槽编号，count 为 1..D；lane k 的槽号为 (id+k) mod F。接受请求后按 count 增加 outstanding；ICache 为每个已接受包产生一次 ic_rsp 事件，含相同 gen/id/count 和按 lane 排列的指令字。Fetch 只消费当前 fetch_gen 的响应，每槽还必须处于 waiting 且 slot_gen 匹配，才写入 inst 并置 ready。当前路径响应按 count 归还额度；旧 generation 的包不写槽也不改变当前路径额度。RAM 外 PC 本地填 inst=0 并就绪，不占取指额度、不进入 ICache。
 
-最老且按预测流连续就绪的至多 D 个槽形成 fetch_packet 包，PC 不要求连续。valid 时 count 为 1..D，整包接受；背压期间 count 和载荷保持。Decode 纯组合转换：decode_valid=fetch_valid、fetch_ready=decode_ready，count 原样传递。Rename 缓冲已接收的包。
+fetch_redirect 当拍取消未接受 offer 和旧输出，边沿清旧槽及当前路径 outstanding，设置目标 PC，并将 fetch_gen 更新为 payload.new_gen。generation 只由 branch_ctrl 产生。ICache 同拍取消旧等待包与旧命中响应，不再为取消的包返回事件；物理填充读数由 ICache/桥独立维护，不受 Fetch 清零影响。下一拍可创建新路径槽。复位 PC=RESET_PC、fetch_gen=0。
+
+最老连续就绪的至多 D 个槽形成 fetch_packet，valid 时 count 为 1..D，整包接受。输出缓冲可在旧包接受的边沿装入后续就绪包，无输出空拍；复制后不再引用源槽，背压期间 count 和载荷保持。Decode 纯组合转换，count 原样传递；Rename 缓冲已接收的包。
+
+### 5.2 Instruction Cache
+
+Cache 默认 4 KiB、2 路、32 B 行、64 组。完整 32 位地址拆成 tag、组号、行内字号。每路一个同步 1RW sram_fakeram，DEPTH=S、WIDTH=ICACHE_LINE_BYTES×8，整行写入；tag、valid 与每组替换指针用寄存器。复位只清 valid、替换指针及控制状态，不清 tag、SRAM 或无效载荷。
+
+命中请求在接受边沿启动 SRAM 读，下一周期产生包响应；无写入冲突时可每拍接收一个包。替换先选最低编号无效路，否则选轮转指针；分配填充时立即使目标路无效，安装成功后将指针推进到该路的下一路。
+
+唯一 MSHR 保存行地址、目标组/路、填充 generation、发送/返回计数、整行缓冲和一个可取消等待包。行按字号 0..L-1 逐字发 if_req，id 为行内字号，addr=line_base+4×id，每拍最多一笔，可多笔在途。桥响应按原 gen/id 写整行缓冲；填充读不占 IFETCH_OUTSTANDING。收齐后一个周期写整行 SRAM 并发布 tag/valid，等待包随后从填充缓冲返回；不做关键字优先或提前返回。
+
+填充期间其他有效行可以命中。填充写入周期背压全部新包；第二个不同行 miss 等待 MSHR 释放。同一填充行在没有有效等待包时，可接收一个新等待包。每拍最多一个 ic_rsp，命中读取优先，填充完成包缓存在 MSHR 中直到能发送；安装且等待包已发送或取消后释放 MSHR。
+
+fetch_redirect 当拍禁止取指包接收与响应，清命中响应状态及等待包，但保留有效缓存和物理填充，并继续发送、接收整行读事务。新路径命中可继续；同一填充行可重新建立等待包，不同行 miss 须等待。等待包 generation 与填充 generation 分别锁存，旧填充可向新 generation 的有效等待包供数。
 
 Decode 生成已扩展的 imm：I/S/B/J 符号扩展，U 为 inst[31:12]<<12。LUI、AUIPC、JAL 不使用寄存器源；JALR、立即数运算和 Load 使用 rs1；条件分支、寄存器运算、Store、M 扩展使用 rs1/rs2。只有具有架构目的的操作保留 rd。op 决定 ALU 输入选择、访存大小和符号扩展，不重复传递这些控制位。
 
@@ -352,11 +377,11 @@ squash 只清除年轻 LQ/SQ、年轻未接受请求和年轻完成缓冲，保�
 
 ### 11.1 读通路
 
-IF/LD 请求为独立保持型通道，分别使用 FIDW/LIDW 位 id，并携带请求所属 generation（`{gen,id}`）；外部 AXI 端口不增加 ID。共享最多 AXI_RD_OUTSTANDING 笔请求；两者同时有效时轮询，复位 IF 优先，每次接收后优先另一方，每拍至多接受一个。桥本地记录 source、generation、对应槽号和 AR 所需地址。LD 的 generation 来自原 Load 发出时锁存的值，不强制改成当前 generation。
+ICache 填充 IF/LD 请求为独立保持型通道，分别使用 IF_ID_WIDTH/LIDW 位 id，并携带请求所属 generation（`{gen,id}`）；外部 AXI 端口不增加 ID。共享最多 AXI_RD_OUTSTANDING 笔请求；两者同时有效时轮询，复位 IF 优先，每次接收后优先另一方，每拍至多接受一个。桥本地记录 source、generation、对应槽号和 AR 所需地址。LD 的 generation 来自原 Load 发出时锁存的值，不强制改成当前 generation。
 
 已接受请求按顺序发送 AR，arvalid/addr 保持至 arready。请求描述符保留到对应 R 握手；AXI 无 ID，R 匹配最老的已发 AR 请求。同拍刚握手的 AR 最早下一拍才接受其 R，符合外部从机延迟约定。
 
-Fetch 和 LSU 为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_rsp_ready，也不需要桥内返回数据队列。存在已发 AR 的队首事务时桥接收 R，在握手拍向对应客户端发送一次 `{gen,id,data}` 事件并释放桥槽。无论身份是否已被 squash 都返回事件，由客户端按 `{gen,id}` 匹配：匹配则写槽，否则丢弃数据并归还本类额度。桥不按当前 generation 过滤，也不因前端恢复而阻塞 R。
+ICache 填充缓冲和 LSU 为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_rsp_ready，也不需要桥内返回数据队列。存在已发 AR 的队首事务时桥接收 R，在握手拍向对应客户端发送一次 `{gen,id,data}` 事件并释放桥槽。无论身份是否已被 squash 都返回事件，由客户端按 `{gen,id}` 匹配：ICache 按物理填充身份写整行缓冲，LSU 匹配则写槽，否则丢弃数据并归还 Load 额度。桥不按当前 generation 过滤，也不因前端恢复而阻塞 R。
 
 ### 11.2 写通路
 
@@ -372,9 +397,9 @@ Fetch 和 LSU 为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_r
 
 ### 12.1 Generation 方案
 
-branch_ctrl 维护全局 `current_gen[GEN_WIDTH-1:0]`，默认 `GEN_WIDTH=16`，复位为 0。**每次发生实际 redirect**（分支误预测或 `front_redirect` 前端纠正）时组合得到 `new_gen=current_gen+1`，在恢复边沿更新 `current_gen<=new_gen`，并把同一个 `new_gen` 放入 `fetch_redirect`。generation 只用于异步读请求的身份匹配：`if_req/if_rsp` 和 `ld_req/ld_rsp` 携带 `{gen,id}`。
+branch_ctrl 维护全局 `current_gen[GEN_WIDTH-1:0]`，默认 `GEN_WIDTH=16`，复位为 0。**每次发生实际 redirect**（分支误预测或 `front_redirect` 前端纠正）时组合得到 `new_gen=current_gen+1`，在恢复边沿更新 `current_gen<=new_gen`，并把同一个 `new_gen` 放入 `fetch_redirect`。generation 只用于异步读请求的身份匹配：`ic_req/ic_rsp` 携带取指包身份，`if_req/if_rsp` 携带物理填充身份，`ld_req/ld_rsp` 携带 Load 身份。
 
-- 请求发出后在该槽锁存当时的 generation；响应只有在 `{gen,id}` 与该槽记录匹配时才被接受，否则只归还 outstanding 额度并丢弃数据。
+- Load 请求发出后在槽中锁存 generation，所有响应归还物理额度，匹配才写槽。Fetch 额度只统计当前路径包；ICache 在 redirect 取消旧包，但物理填充继续按原身份完成，不能按当前前端 generation 丢弃填充响应。
 - 约定从任一读请求被 bridge 接收到其响应返回期间，发生的实际 redirect 次数严格小于 `2^16`，因此 16 位 generation 不会发生 ABA 回绕碰撞。该假设约束的是旧请求存活期间的 redirect 次数，与同时 outstanding 的读事务数量没有直接关系。
 - 不设 epoch 池、`recovery_epoch`、`epoch_free`、`epoch_alloc_id`、`rob_epoch_busy`、`bridge_epoch_busy`。ROB tag 只含 rob_id/index，后端不携带 generation。
 
@@ -391,7 +416,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 | squash_tag | branch_ctrl → ROB、IQ、issue_sched、FU、LSU、wb_arb | 最老误预测分支身份，供年龄比较；Rename 只使用 restore_cp_id |
 | restore_cp_id | branch_ctrl → Rename | squash 当拍读取的快照编号 |
 | cp_release_mask[K] | branch_ctrl → Rename | 本拍解析/清除的 checkpoint；恢复读取优先于释放 |
-| fetch_redirect_valid/payload | branch_ctrl → Fetch | 目标 PC 与新 generation，来自执行期恢复或前端纠正 |
+| fetch_redirect_valid/payload | branch_ctrl → Fetch；valid 同时送 ICache | 目标 PC 与新 generation，来自执行期恢复或前端纠正 |
 
 控制器对每个解析候选匹配 checkpoint 的有效位及完整 tag。匹配的误预测按恢复前 rob_head 选择最老者 b；产生 squash(b)、restore_cp_id、fetch_redirect 和新 generation（`current_gen+1`）。cp_release_mask 同时包含 b、更年轻 checkpoint，以及本拍正确解析且不年轻于 b 的 checkpoint。没有误预测时只释放正确解析项。
 
@@ -401,11 +426,12 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 ### 12.3 年龄边界与事件优先级
 
-恢复时 `younger(tag,b) = age(tag.index) > age(b.index)`，使用边沿前同一个 rob_head；仅用于当前活跃内部工作。外部迟到响应先由 Fetch/LSU 按完整 `{gen,id}` 身份筛除；内部结果按第 8.2 节的生命周期约定保持活跃，再比较年龄，不能把已失效旧标签直接当成当前槽的年龄。generation 既不表示年龄，也不是“只允许当前 generation 执行”的全局开关。
+恢复时 `younger(tag,b) = age(tag.index) > age(b.index)`，使用边沿前同一个 rob_head；仅用于当前活跃内部工作。外部迟到响应先由 ICache/LSU 按完整 `{gen,id}` 身份匹配，Fetch 仅接收未取消的包响应；内部结果按第 8.2 节的生命周期约定保持活跃，再比较年龄，不能把已失效旧标签直接当成当前槽的年龄。generation 既不表示年龄，也不是“只允许当前 generation 执行”的全局开关。
 
 | 模块 | 恢复行为 |
 |---|---|
-| Fetch | 清全部旧前端槽/offer/输出，消费 branch_ctrl 给出的目标 PC/new_gen，更新本地 fetch_gen，保留未完成读计数 |
+| Fetch | 清全部旧前端槽/offer/输出，消费 branch_ctrl 给出的目标 PC/new_gen，更新本地 fetch_gen，清当前路径取指槽额度 |
+| ICache | 取消命中响应与等待包，保留有效缓存和物理填充，继续履行填充读 |
 | Rename | 清未派遣缓冲，按 checkpoint 恢复推测 RAT/回收年轻目的；继续接收较老退休和存活唤醒 |
 | ROB | 保留至 b，尾部截断；较老同拍退休、完成和 Store 回报继续生效 |
 | IQ/issue_sched | 仅删除年轻项/入口，屏蔽年轻 take/执行握手，允许存活候选继续发射 |
@@ -426,10 +452,11 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 ```systemverilog
 module student_top #(
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
-    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ISSUE_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer WB_WIDTH = 1,
+    parameter integer COMMIT_WIDTH = 1,
+
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer IQ_ALU_DEPTH = 16,
@@ -438,29 +465,31 @@ module student_top #(
     parameter integer SQ_DEPTH = 8,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer IFETCH_OUTSTANDING = 8,
+    parameter integer ICACHE_SIZE_BYTES = 4096,
+    parameter integer ICACHE_WAYS = 2,
+    parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer LOAD_OUTSTANDING = 8,
     parameter integer AXI_RD_OUTSTANDING = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000
 ) (
-    input logic clock,
-    input logic reset,
-    output logic [32-1:0] araddr,
+    input logic clock, reset,
+    output logic [31:0] araddr,
     output logic arvalid,
     input logic arready,
-    input logic [32-1:0] rdata,
-    input logic [2-1:0] rresp,
+    input logic [31:0] rdata,
+    input logic [1:0] rresp,
     input logic rvalid,
     output logic rready,
-    output logic [32-1:0] awaddr,
+    output logic [31:0] awaddr,
     output logic awvalid,
     input logic awready,
-    output logic [32-1:0] wdata,
-    output logic [4-1:0] wstrb,
+    output logic [31:0] wdata,
+    output logic [3:0] wstrb,
     output logic wvalid,
     input logic wready,
-    input logic [2-1:0] bresp,
+    input logic [1:0] bresp,
     input logic bvalid,
     output logic bready
 );
@@ -474,28 +503,28 @@ module fetch #(
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer IFETCH_OUTSTANDING = 8,
+    parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
     parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
-    parameter integer FETCH_BITS = 32 + 32 + 32,
+    parameter integer FETCH_BITS = 96,
     parameter integer FETCH_REDIRECT_BITS = 32 + GEN_WIDTH,
-    parameter integer IF_REQ_BITS = GEN_WIDTH + FIDW + 32,
-    parameter integer IF_RSP_BITS = GEN_WIDTH + FIDW + 32
+    parameter integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32,
+    parameter integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32*DISPATCH_WIDTH
 ) (
-    input logic clock,
-    input logic reset,
+    input logic clock, reset,
     input logic fetch_redirect_valid,
-    input logic [FETCH_REDIRECT_BITS-1:0] fetch_redirect_payload, // fetch_redirect_t
-    output logic if_req_valid,
-    input logic if_req_ready,
-    output logic [IF_REQ_BITS-1:0] if_req_payload, // if_req_t
-    input logic if_rsp_valid,
-    input logic [IF_RSP_BITS-1:0] if_rsp_payload, // if_rsp_t
+    input logic [FETCH_REDIRECT_BITS-1:0] fetch_redirect_payload,
+    output logic ic_req_valid,
+    input logic ic_req_ready,
+    output logic [IC_REQ_BITS-1:0] ic_req_payload,
+    input logic ic_rsp_valid,
+    input logic [IC_RSP_BITS-1:0] ic_rsp_payload,
     output logic fetch_valid,
     input logic fetch_ready,
     output logic [DCW-1:0] fetch_count,
-    output logic [DISPATCH_WIDTH*FETCH_BITS-1:0] fetch_packet // fetch_packet_t × D
+    output logic [DISPATCH_WIDTH*FETCH_BITS-1:0] fetch_packet
 );
 endmodule
 ```
@@ -991,52 +1020,86 @@ module axi_bridge #(
     parameter integer GEN_WIDTH = 16,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
-    parameter integer IF_REQ_BITS = GEN_WIDTH + FIDW + 32,
-    parameter integer IF_RSP_BITS = GEN_WIDTH + FIDW + 32,
+    parameter integer IF_ID_WIDTH = FIDW,
+    parameter integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32,
+    parameter integer IF_RSP_BITS = GEN_WIDTH + IF_ID_WIDTH + 32,
     parameter integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32,
     parameter integer LD_RSP_BITS = GEN_WIDTH + LIDW + 32,
-    parameter integer WRITE_REQ_BITS = 32 + 32 + 4
+    parameter integer WRITE_REQ_BITS = 68
 ) (
-    input logic clock,
-    input logic reset,
+    input logic clock, reset,
     input logic if_req_valid,
     output logic if_req_ready,
-    input logic [IF_REQ_BITS-1:0] if_req_payload, // if_req_t
+    input logic [IF_REQ_BITS-1:0] if_req_payload,
     output logic if_rsp_valid,
-    output logic [IF_RSP_BITS-1:0] if_rsp_payload, // if_rsp_t
+    output logic [IF_RSP_BITS-1:0] if_rsp_payload,
     input logic ld_req_valid,
     output logic ld_req_ready,
-    input logic [LD_REQ_BITS-1:0] ld_req_payload, // ld_req_t
+    input logic [LD_REQ_BITS-1:0] ld_req_payload,
     output logic ld_rsp_valid,
-    output logic [LD_RSP_BITS-1:0] ld_rsp_payload, // ld_rsp_t
+    output logic [LD_RSP_BITS-1:0] ld_rsp_payload,
     input logic st_req_valid,
     output logic st_req_ready,
-    input logic [WRITE_REQ_BITS-1:0] st_req_payload, // write_req_t
+    input logic [WRITE_REQ_BITS-1:0] st_req_payload,
     output logic st_rsp_valid,
-    output logic [32-1:0] araddr,
+    output logic [31:0] araddr,
     output logic arvalid,
     input logic arready,
-    input logic [32-1:0] rdata,
-    input logic [2-1:0] rresp,
+    input logic [31:0] rdata,
+    input logic [1:0] rresp,
     input logic rvalid,
     output logic rready,
-    output logic [32-1:0] awaddr,
+    output logic [31:0] awaddr,
     output logic awvalid,
     input logic awready,
-    output logic [32-1:0] wdata,
-    output logic [4-1:0] wstrb,
+    output logic [31:0] wdata,
+    output logic [3:0] wstrb,
     output logic wvalid,
     input logic wready,
-    input logic [2-1:0] bresp,
+    input logic [1:0] bresp,
     input logic bvalid,
     output logic bready
 );
 endmodule
 ```
 
+### 13.16 `icache`
+
+```systemverilog
+module icache #(
+    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer ICACHE_SIZE_BYTES = 4096,
+    parameter integer ICACHE_WAYS = 2,
+    parameter integer ICACHE_LINE_BYTES = 32,
+    parameter integer GEN_WIDTH = 16,
+    parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
+    parameter integer DCW = $clog2(DISPATCH_WIDTH + 1),
+    parameter integer IF_ID_WIDTH = $clog2(ICACHE_LINE_BYTES/4),
+    parameter integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32,
+    parameter integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32*DISPATCH_WIDTH,
+    parameter integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32,
+    parameter integer IF_RSP_BITS = GEN_WIDTH + IF_ID_WIDTH + 32
+) (
+    input logic clock, reset,
+    input logic fetch_redirect_valid,
+    input logic ic_req_valid,
+    output logic ic_req_ready,
+    input logic [IC_REQ_BITS-1:0] ic_req_payload,
+    output logic ic_rsp_valid,
+    output logic [IC_RSP_BITS-1:0] ic_rsp_payload,
+    output logic if_req_valid,
+    input logic if_req_ready,
+    output logic [IF_REQ_BITS-1:0] if_req_payload,
+    input logic if_rsp_valid,
+    input logic [IF_RSP_BITS-1:0] if_rsp_payload
+);
+endmodule
+```
+
 ## 14. 顶层连接
 
-- Fetch→Decode→Rename 的包接口不携带 generation；Fetch 在入口按 `{gen,id}` 过滤取指响应，任何重定向都清除尚未派遣的旧前端数据。branch_ctrl.fetch_redirect_* 接 Fetch，current_gen 由 branch_ctrl 维护并用于产生重定向目标。
+- Fetch→Decode→Rename 的包接口不携带 generation；Fetch 在入口按 `{gen,id}` 过滤取指响应，任何重定向都清除尚未派遣的旧前端数据。branch_ctrl.fetch_redirect_* 接 Fetch，valid 同时接 ICache；current_gen 由 branch_ctrl 维护并用于产生重定向目标。
 - Rename 的 disp_rob 接 ROB，disp_alu/disp_mem 分别接 IQ，disp_lsq 接 LSU。顶层按 disp_rob.kind 和统一 fire 产生 IQ/LSU 的有效 lane，squash 当拍禁止 fire；不要用前端纠正信号反向门控 fire。
 - branch_ctrl 的 checkpoint 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_valid/front_redirect_pc 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
 - rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl、wb_arb，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
@@ -1044,5 +1107,11 @@ endmodule
 - 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb，由 WB 按 squash 年龄边界筛选后仲裁。
 - wb_arb.done_tag/valid 只接 ROB；write_* 接 PRF，write_valid/pdst 另接 Rename 和两 IQ 的 wake_*。控制流 npc 不进入该广播。
 - ROB.reg_commit_* 只接 Rename（仅携带 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
-- IF/LD 请求与响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
+- Fetch→ICache 使用带 count 的包请求/响应；ICache→桥的 IF 与 LSU→桥的 LD 请求和响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
 - 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；也不再有 epoch 池相关端口。PRF 不接 squash，写入由 WB 筛选后的 write_valid 控制。外部 AXI 端口保持。
+
+## 15. Instruction Cache 验证
+
+`make test-icache` 运行 Cache/桥和 Fetch/Cache 定向测试，并以 SystemVerilog 2005 编译：覆盖宽度 1/2/4、相联度 1/2/4、行大小 16/32/64 B、单组 Cache、连续命中、填充/Load 竞争、背压、替换、跨行、槽号回绕、多次重定向以及命中/填充返回同拍重定向。还覆盖 IFETCH_OUTSTANDING 小于 D、输出阻塞、非 RAM PC 与 32 位 PC 回绕。
+
+集成验证使用 `make test`、`make perf`、`make synth`。Docker 工具链中可加 `APPIMAGE=` 使用容器原生工具；这些测试不增加 RTL 验证或调试端口。

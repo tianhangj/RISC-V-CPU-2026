@@ -5,8 +5,9 @@ module axi_bridge #(
     parameter integer GEN_WIDTH = 16,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
-    parameter integer IF_REQ_BITS = GEN_WIDTH + FIDW + 32,
-    parameter integer IF_RSP_BITS = GEN_WIDTH + FIDW + 32,
+    parameter integer IF_ID_WIDTH = FIDW,
+    parameter integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32,
+    parameter integer IF_RSP_BITS = GEN_WIDTH + IF_ID_WIDTH + 32,
     parameter integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32,
     parameter integer LD_RSP_BITS = GEN_WIDTH + LIDW + 32,
     parameter integer WRITE_REQ_BITS = 68
@@ -46,7 +47,7 @@ module axi_bridge #(
 );
     localparam integer QW = (AXI_RD_OUTSTANDING > 1) ? $clog2(AXI_RD_OUTSTANDING) : 1;
     localparam integer CW = $clog2(AXI_RD_OUTSTANDING + 1);
-    localparam integer MIDW = (LIDW > FIDW) ? LIDW : FIDW;
+    localparam integer MIDW = (LIDW > IF_ID_WIDTH) ? LIDW : IF_ID_WIDTH;
     logic [31:0] address [0:AXI_RD_OUTSTANDING-1];
     logic [GEN_WIDTH-1:0] generation [0:AXI_RD_OUTSTANDING-1];
     logic [MIDW-1:0] identifier [0:AXI_RD_OUTSTANDING-1];
@@ -81,7 +82,7 @@ module axi_bridge #(
     assign rready = sent_q != 0;
     assign if_rsp_valid = r_fire && !is_load[response_q];
     assign ld_rsp_valid = r_fire && is_load[response_q];
-    assign if_rsp_payload = {generation[response_q], identifier[response_q][FIDW-1:0], rdata};
+    assign if_rsp_payload = {generation[response_q], identifier[response_q][IF_ID_WIDTH-1:0], rdata};
     assign ld_rsp_payload = {generation[response_q], identifier[response_q][LIDW-1:0], rdata};
     assign st_req_ready = !write_busy;
     assign awaddr = write_q[WRITE_REQ_BITS-1 -: 32];
@@ -112,8 +113,8 @@ module axi_bridge #(
                     generation[enqueue_q] <= ld_req_payload[32+LIDW +: GEN_WIDTH];
                 end else begin
                     address[enqueue_q] <= if_req_payload[31:0];
-                    identifier[enqueue_q] <= if_req_payload[32 +: FIDW];
-                    generation[enqueue_q] <= if_req_payload[32+FIDW +: GEN_WIDTH];
+                    identifier[enqueue_q] <= MIDW'(if_req_payload[32 +: IF_ID_WIDTH]);
+                    generation[enqueue_q] <= if_req_payload[32+IF_ID_WIDTH +: GEN_WIDTH];
                 end
                 enqueue_q <= (enqueue_q == AXI_RD_OUTSTANDING-1) ? 0 : enqueue_q + 1'b1;
                 prefer_load <= !accept_load;

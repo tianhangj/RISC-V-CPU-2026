@@ -33,7 +33,7 @@ ifneq ($(strip $(BLACKBOXES)),)
 $(error BLACKBOXES has been removed; instantiate sram_fakeram instead)
 endif
 
-.PHONY: code help build run test perf synth clean
+.PHONY: code help build run test test-icache perf synth clean
 
 # OJ always builds RTL and collects ./code. SIM affects local run/test/perf only.
 code:
@@ -47,6 +47,7 @@ help:
 	@echo 'make build [FILELIST=verilog/filelist.f BUILD=build JOBS=4]'
 	@echo 'make run PROGRAM=program.bin EXPECTED=186 [WAVE=trace.vcd] [LOG=run.log]'
 	@echo 'make test [Case=correctness_add_to_100] [SIM=/path/to/prebuilt/sim]'
+	@echo 'make test-icache [BUILD=build JOBS=4]'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=2.0 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
@@ -73,6 +74,10 @@ test:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/testcase.py" --kind correctness --build "$(BUILD)" \
 		--testcases "$(TESTCASES)" --max-cycles $(MAX_CYCLES) --latency $(LATENCY) \
 		$(if $(SIM),--sim "$(SIM)",) $(if $(Case),--case "$(Case)",)
+
+test-icache:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_icache.py" --build "$(BUILD)/icache-tests" --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
 
 perf:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/testcase.py" --kind perf --build "$(BUILD)" \

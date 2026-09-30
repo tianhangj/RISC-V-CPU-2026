@@ -11,6 +11,7 @@ prf.sv
 rob.sv
 branch_ctrl.sv
 fetch.sv
+icache.sv
 axi_bridge.sv
 iq_alu.sv
 iq_mem.sv

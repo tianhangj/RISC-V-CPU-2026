@@ -12,6 +12,9 @@ module student_top #(
     parameter integer SQ_DEPTH = 8,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer IFETCH_OUTSTANDING = 8,
+    parameter integer ICACHE_SIZE_BYTES = 4096,
+    parameter integer ICACHE_WAYS = 2,
+    parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer LOAD_OUTSTANDING = 8,
     parameter integer AXI_RD_OUTSTANDING = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -63,12 +66,18 @@ module student_top #(
     localparam integer MEM_EXEC_BITS = RW + 3 + MIDW + 96;
     localparam integer RESULT_BITS = RW + PW + 32;
     localparam integer RESOLVE_BITS = RW + CIDW + 32;
-    localparam integer IF_REQ_BITS = GEN_WIDTH + FIDW + 32;
+    localparam integer IF_ID_WIDTH = $clog2(ICACHE_LINE_BYTES/4);
+    localparam integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32;
+    localparam integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32;
+    localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32*DISPATCH_WIDTH;
     localparam integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32;
     localparam integer WRITE_REQ_BITS = 68;
 
     logic if_req_valid, if_req_ready, if_rsp_valid;
     logic [IF_REQ_BITS-1:0] if_req_payload, if_rsp_payload;
+    logic ic_req_valid, ic_req_ready, ic_rsp_valid;
+    logic [IC_REQ_BITS-1:0] ic_req_payload;
+    logic [IC_RSP_BITS-1:0] ic_rsp_payload;
     logic ld_req_valid, ld_req_ready, ld_rsp_valid;
     logic [LD_REQ_BITS-1:0] ld_req_payload, ld_rsp_payload;
     logic st_req_valid, st_req_ready, st_rsp_valid;
@@ -157,10 +166,16 @@ module student_top #(
 
     fetch #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
         .IFETCH_OUTSTANDING(IFETCH_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH),
-        .RESET_PC(RESET_PC)) u_fetch (
+        .RESET_PC(RESET_PC), .ICACHE_LINE_BYTES(ICACHE_LINE_BYTES)) u_fetch (
         .clock, .reset, .fetch_redirect_valid, .fetch_redirect_payload,
-        .if_req_valid, .if_req_ready, .if_req_payload, .if_rsp_valid, .if_rsp_payload,
+        .ic_req_valid, .ic_req_ready, .ic_req_payload, .ic_rsp_valid, .ic_rsp_payload,
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet);
+    icache #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
+        .ICACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .ICACHE_WAYS(ICACHE_WAYS),
+        .ICACHE_LINE_BYTES(ICACHE_LINE_BYTES), .GEN_WIDTH(GEN_WIDTH)) u_icache (
+        .clock, .reset, .fetch_redirect_valid,
+        .ic_req_valid, .ic_req_ready, .ic_req_payload, .ic_rsp_valid, .ic_rsp_payload,
+        .if_req_valid, .if_req_ready, .if_req_payload, .if_rsp_valid, .if_rsp_payload);
     decode #(.DISPATCH_WIDTH(DISPATCH_WIDTH)) u_decode (
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet,
         .decode_valid, .decode_ready, .decode_count, .decode_uop);
@@ -255,7 +270,8 @@ module student_top #(
         .lsu_result_valid, .lsu_result_ready, .lsu_result_payload,
         .done_valid, .done_tag, .write_valid, .write_pdst, .write_value);
     axi_bridge #(.LQ_DEPTH(LQ_DEPTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
-        .AXI_RD_OUTSTANDING(AXI_RD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH)) u_axi (
+        .AXI_RD_OUTSTANDING(AXI_RD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH),
+        .IF_ID_WIDTH(IF_ID_WIDTH)) u_axi (
         .clock, .reset, .if_req_valid, .if_req_ready, .if_req_payload,
         .if_rsp_valid, .if_rsp_payload, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready, .st_req_payload,
