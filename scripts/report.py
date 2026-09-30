@@ -25,7 +25,7 @@ def filename():
     subject = git("log", "-1", "--format=%s")
     slug = "".join(char if char.isalnum() or char in "._-" else "-" for char in subject)
     slug = slug.strip("._-")[:80].rstrip("._-") or "commit"
-    return f"report@{commit[:6]}_{slug}.txt", commit, subject
+    return f"report@{int(now.timestamp())}({commit[:6]})_{slug}.txt", commit, subject
 
 
 def run_target(image, target, report):
