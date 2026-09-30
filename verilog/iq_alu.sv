@@ -7,6 +7,7 @@ module iq_core #(
     parameter integer DEPTH = 16,
     parameter integer UOP_BITS = 95,
     parameter integer SRC2_LSB = 64,
+    parameter integer BYPASS_WAKE = 0,
     parameter integer RW = $clog2(ROB_DEPTH),
     parameter integer PW = $clog2(PRF_SIZE),
     parameter integer CW = $clog2(DEPTH + 1)
@@ -35,8 +36,11 @@ module iq_core #(
     integer choice, free_temp;
     logic [RW-1:0] best_age, age;
     logic [PW-1:0] ps1, ps2;
+    logic [PW-1:0] select_ps1, select_ps2;
+    logic select_ready1, select_ready2;
     logic w1, w2;
-    always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_valid) begin
+    always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_valid or
+             wake_valid or wake_pdst) begin
         free_temp = 0;
         for (int s = 0; s < DEPTH; s = s + 1)
             if (!valid_q[s]) free_temp = free_temp + 1;
@@ -49,7 +53,19 @@ module iq_core #(
             best_age = {RW{1'b1}};
             for (int s = 0; s < DEPTH; s = s + 1) begin
                 age = entry[s][UOP_BITS-1 -: RW] - rob_head;
-                if (valid_q[s] && ready1_q[s] && ready2_q[s] && !candidate_used[s] &&
+                select_ps1 = entry[s][SRC2_LSB+PW +: PW];
+                select_ps2 = entry[s][SRC2_LSB +: PW];
+                select_ready1 = ready1_q[s];
+                select_ready2 = ready2_q[s];
+                if (BYPASS_WAKE != 0) begin
+                    for (int w = 0; w < WB_WIDTH; w = w + 1) begin
+                        if (wake_valid[w] && select_ps1 == wake_pdst[w*PW +: PW])
+                            select_ready1 = 1;
+                        if (wake_valid[w] && select_ps2 == wake_pdst[w*PW +: PW])
+                            select_ready2 = 1;
+                    end
+                end
+                if (valid_q[s] && select_ready1 && select_ready2 && !candidate_used[s] &&
                     (choice < 0 || age < best_age)) begin
                     choice = s;
                     best_age = age;
@@ -137,9 +153,87 @@ module iq_alu #(
     output logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] cand_uop,
     input logic [ISSUE_WIDTH-1:0] cand_take
 );
+    logic [ISSUE_WIDTH-1:0] iq_cand_valid, iq_cand_take;
+    logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] iq_cand_uop;
+    logic [ISSUE_WIDTH-1:0] candidate_valid_q, candidate_valid_next;
+    logic [ALU_IQ_BITS-1:0] candidate_reg [0:ISSUE_WIDTH-1];
+    logic [ALU_IQ_BITS-1:0] candidate_next [0:ISSUE_WIDTH-1];
+    integer next_count, insert_at;
+    logic [RW-1:0] item_age;
+
     iq_core #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_ALU_DEPTH), .UOP_BITS(ALU_IQ_BITS), .SRC2_LSB(64),
-        .RW(RW), .PW(PW), .CW(AIQ_CW)) core (.*,
-        .free_count(alu_iq_free));
+        .BYPASS_WAKE(1),
+        .RW(RW), .PW(PW), .CW(AIQ_CW)) core (
+        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .wake_valid, .wake_pdst, .free_count(alu_iq_free),
+        .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
+        .cand_take(iq_cand_take));
+
+    for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin : g_candidate_output
+        wire [RW-1:0] age = candidate_reg[lane][ALU_IQ_BITS-1 -: RW] - rob_head;
+        assign cand_valid[lane] = candidate_valid_q[lane] &&
+            (!squash_valid || age <= (squash_tag - rob_head));
+        assign cand_uop[lane*ALU_IQ_BITS +: ALU_IQ_BITS] = candidate_reg[lane];
+    end
+
+    // Each candidate register is an independent queue entry. An IQ entry is
+    // released on the edge that copies it into one of these entries.
+    always_comb begin
+        candidate_valid_next = 0;
+        iq_cand_take = 0;
+        next_count = 0;
+        insert_at = 0;
+        item_age = 0;
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
+            candidate_next[lane] = 0;
+
+        // Keep unconsumed entries, then refill every available position.
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
+            if (candidate_valid_q[lane] && !cand_take[lane] && cand_valid[lane]) begin
+                item_age = candidate_reg[lane][ALU_IQ_BITS-1 -: RW] - rob_head;
+                insert_at = next_count;
+                for (int pos = 0; pos < next_count; pos = pos + 1)
+                    if (insert_at == next_count &&
+                        item_age < (candidate_next[pos][ALU_IQ_BITS-1 -: RW] - rob_head))
+                        insert_at = pos;
+                for (int pos = ISSUE_WIDTH-1; pos > insert_at; pos = pos - 1)
+                    candidate_next[pos] = candidate_next[pos-1];
+                candidate_next[insert_at] = candidate_reg[lane];
+                next_count = next_count + 1;
+            end
+        end
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
+            if (next_count < ISSUE_WIDTH && iq_cand_valid[lane] &&
+                (!squash_valid ||
+                 ((iq_cand_uop[lane*ALU_IQ_BITS + ALU_IQ_BITS-1 -: RW] - rob_head)
+                  <= (squash_tag - rob_head)))) begin
+                iq_cand_take[lane] = 1;
+                item_age = iq_cand_uop[lane*ALU_IQ_BITS + ALU_IQ_BITS-1 -: RW] - rob_head;
+                insert_at = next_count;
+                for (int pos = 0; pos < next_count; pos = pos + 1)
+                    if (insert_at == next_count &&
+                        item_age < (candidate_next[pos][ALU_IQ_BITS-1 -: RW] - rob_head))
+                        insert_at = pos;
+                for (int pos = ISSUE_WIDTH-1; pos > insert_at; pos = pos - 1)
+                    candidate_next[pos] = candidate_next[pos-1];
+                candidate_next[insert_at] = iq_cand_uop[lane*ALU_IQ_BITS +: ALU_IQ_BITS];
+                next_count = next_count + 1;
+            end
+        end
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
+            if (lane < next_count) candidate_valid_next[lane] = 1;
+    end
+
+    always_ff @(posedge clock) begin
+        if (reset) begin
+            candidate_valid_q <= 0;
+        end else begin
+            candidate_valid_q <= candidate_valid_next;
+            for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1)
+                candidate_reg[lane] <= candidate_next[lane];
+        end
+    end
 endmodule
