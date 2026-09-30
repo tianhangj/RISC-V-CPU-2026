@@ -195,12 +195,12 @@ module iq_alu #(
             if (candidate_valid_q[lane] && !cand_take[lane] && cand_valid[lane]) begin
                 item_age = candidate_reg[lane][ALU_IQ_BITS-1 -: RW] - rob_head;
                 insert_at = next_count;
-                for (int pos = 0; pos < next_count; pos = pos + 1)
-                    if (insert_at == next_count &&
+                for (int pos = 0; pos < ISSUE_WIDTH; pos = pos + 1)
+                    if (pos < next_count && insert_at == next_count &&
                         item_age < (candidate_next[pos][ALU_IQ_BITS-1 -: RW] - rob_head))
                         insert_at = pos;
-                for (int pos = ISSUE_WIDTH-1; pos > insert_at; pos = pos - 1)
-                    candidate_next[pos] = candidate_next[pos-1];
+                for (int pos = ISSUE_WIDTH-1; pos > 0; pos = pos - 1)
+                    if (pos > insert_at) candidate_next[pos] = candidate_next[pos-1];
                 candidate_next[insert_at] = candidate_reg[lane];
                 next_count = next_count + 1;
             end
@@ -213,12 +213,12 @@ module iq_alu #(
                 iq_cand_take[lane] = 1;
                 item_age = iq_cand_uop[lane*ALU_IQ_BITS + ALU_IQ_BITS-1 -: RW] - rob_head;
                 insert_at = next_count;
-                for (int pos = 0; pos < next_count; pos = pos + 1)
-                    if (insert_at == next_count &&
+                for (int pos = 0; pos < ISSUE_WIDTH; pos = pos + 1)
+                    if (pos < next_count && insert_at == next_count &&
                         item_age < (candidate_next[pos][ALU_IQ_BITS-1 -: RW] - rob_head))
                         insert_at = pos;
-                for (int pos = ISSUE_WIDTH-1; pos > insert_at; pos = pos - 1)
-                    candidate_next[pos] = candidate_next[pos-1];
+                for (int pos = ISSUE_WIDTH-1; pos > 0; pos = pos - 1)
+                    if (pos > insert_at) candidate_next[pos] = candidate_next[pos-1];
                 candidate_next[insert_at] = iq_cand_uop[lane*ALU_IQ_BITS +: ALU_IQ_BITS];
                 next_count = next_count + 1;
             end
