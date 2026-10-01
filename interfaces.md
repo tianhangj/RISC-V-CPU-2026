@@ -142,32 +142,32 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 
 ### 3.3 位宽
 
-下表位数沿用顶层当前默认 D=I=W=C=2 的配置示例。
+下表位数对应第 2 节的顶层默认参数（D=I=W=C=2、R=16、P=48、LQ=SQ=4、F=8、K=4）。各模块独立例化时按其实际参数重算。
 
 | 常量 | 公式 | 默认位数 |
 |---|---|---:|
-| `TAG_BITS` | RW | 5 |
+| `TAG_BITS` | RW | 4 |
 | `FETCH_BITS` | 32 + 32 + 32 | 96 |
 | `DECODE_BITS` | 32 + 32 + 6 + 5 + 5 + 5 + 32 | 117 |
-| `ROB_ALLOC_BITS` | PW + 2 + SIDW | 11 |
-| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 95 |
-| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 55 |
-| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 15 |
-| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 147 |
-| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 78 |
-| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 107 |
-| `RESULT_BITS` | TAG_BITS + PW + 32 | 43 |
-| `RESOLVE_BITS` | TAG_BITS + CIDW + 98 | 105 |
+| `ROB_ALLOC_BITS` | PW + 2 + SIDW | 10 |
+| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 94 |
+| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 53 |
+| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 13 |
+| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 146 |
+| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 77 |
+| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 105 |
+| `RESULT_BITS` | TAG_BITS + PW + 32 | 42 |
+| `RESOLVE_BITS` | TAG_BITS + CIDW + 98 | 104 |
 | `BP_TRAIN_BITS` | 32 + 1 + 1 + 32 | 66 |
-| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
+| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 38 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
 | `REG_COMMIT_BITS` | PW | 6 |
-| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 54 |
-| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 86 |
+| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 53 |
+| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 85 |
 | `IF_REQ_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
 | `IF_RSP_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
-| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
-| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
+| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
+| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
 | `WRITE_REQ_BITS` | 32 + 32 + 4 | 68 |
 
 ## 4. 外部接口
@@ -1195,3 +1195,5 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 历史紧凑配置（提交 f3ed8dd，D=I=W=C=1、K=1）实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。
 
 当前默认 D=I=W=C=2、K=4、BTB=64、BHT=256：双宽派遣与 Rename 输入重叠减少前端空拍，双宽发射/写回/提交增加后端吞吐，四个 checkpoint 允许多个未解析分支并行在途，扩大预测表减少索引冲突。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
+
+提交 ccb3088 的六项性能测试 IPC 几何平均为 0.3039，相比起点 82187b7 的 0.2166 提高 40.29%，每项 IPC 均提升；19 项 correctness 全部通过。相同 RTL 的 `make synth CLOCK_PERIOD_NS=3.333` 实测 estimated_fmax_mhz=411.98、minimum_period_ns=2.4273、worst_setup_slack_ns=+0.9057，总面积为 12304.86 μm²；结果保存在 `build/ipc-validation/synth-300/opt/`。定向回归 `make test-timing`、`make test-branch`、`make test-icache` 全部通过，包含 SV2005 连续派遣/跨包 RAW/部分派遣及恢复测试。这些数值是既有库与无布线寄生模型下的综合估计。
