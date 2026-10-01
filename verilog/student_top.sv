@@ -1,6 +1,6 @@
 module student_top #(
     parameter integer ISSUE_WIDTH = 1,
-    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 1,
     parameter integer COMMIT_WIDTH = 1,
     
