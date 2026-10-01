@@ -20,7 +20,7 @@ module student_top #(
     parameter integer BHT_ENTRIES = 64,
     parameter integer LOAD_OUTSTANDING = 4,
     parameter integer AXI_RD_OUTSTANDING = 16,
-    parameter integer CHECKPOINT_DEPTH = 1,
+    parameter integer CHECKPOINT_DEPTH = 4,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000
 ) (

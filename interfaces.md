@@ -45,7 +45,7 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | BHT_ENTRIES | 64 | 2 的幂，至少 2，独立 PC 字地址索引 |
 | LOAD_OUTSTANDING | 4 | 1–16，不大于 LQ_DEPTH |
 | AXI_RD_OUTSTANDING | 16 | 1–16，IF/LD 共享 |
-| CHECKPOINT_DEPTH（K） | 1 | 1..R，控制流派遣前分配 |
+| CHECKPOINT_DEPTH（K） | 4 | 1..R，控制流派遣前分配 |
 | GEN_WIDTH | 16 | generation 位宽；在任何旧读事务存活期间不回绕碰撞 |
 | RESET_PC | 32'h00000000 | RAM 内，4 字节对齐 |
 
@@ -493,7 +493,7 @@ module student_top #(
     parameter integer BHT_ENTRIES = 64,
     parameter integer LOAD_OUTSTANDING = 4,
     parameter integer AXI_RD_OUTSTANDING = 16,
-    parameter integer CHECKPOINT_DEPTH = 1,
+    parameter integer CHECKPOINT_DEPTH = 4,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000
 ) (
@@ -1192,4 +1192,6 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 
 综合使用既有 Yosys/ASAP7/OpenSTA 流程，不改变时序约束、库或统计口径。300 MHz 目标可显式设置 `make synth CLOCK_PERIOD_NS=3.333`；验收需同时检查 `estimated_fmax_mhz >= 300` 及目标 setup slack 非负，不能仅凭 make 返回码认定满足频率。该频率为无布线寄生的综合估计。
 
-本次默认配置实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；默认容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。该配置满足本次频率目标，IPC 需单独评估。
+历史紧凑配置（提交 f3ed8dd，D=I=W=C=1、K=1）实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。
+
+当前默认 D=2、I=W=C=1、K=4：双宽派遣与 Rename 输入重叠减少前端空拍，四个 checkpoint 允许多个未解析分支并行在途。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
