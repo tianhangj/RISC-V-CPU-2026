@@ -27,10 +27,10 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 
 | 参数 | 默认 | 取值 |
 |---|---:|---|
-| ISSUE_WIDTH（I） | 1 | 1/2/4，全核每拍发射上限 |
+| ISSUE_WIDTH（I） | 2 | 1/2/4，全核每拍发射上限 |
 | DISPATCH_WIDTH（D） | 2 | 1/2/4 |
-| WB_WIDTH（W） | 1 | 1/2/4，每拍接受完成数 |
-| COMMIT_WIDTH（C） | 1 | 1/2/4 |
+| WB_WIDTH（W） | 2 | 1/2/4，每拍接受完成数 |
+| COMMIT_WIDTH（C） | 2 | 1/2/4 |
 | ROB_DEPTH（R） | 16 | 2 的幂，至少 8，且不小于 I/D/W/C |
 | PRF_SIZE（P） | 48 | 至少 32+D |
 | IQ_ALU_DEPTH / IQ_MEM_DEPTH | 8 / 8 | 2 的幂，至少 D |
@@ -142,7 +142,7 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 
 ### 3.3 位宽
 
-下表位数沿用 D=I=W=C=2 的配置示例；顶层当前默认 D=2、I=W=C=1。
+下表位数沿用顶层当前默认 D=I=W=C=2 的配置示例。
 
 | 常量 | 公式 | 默认位数 |
 |---|---|---:|
@@ -472,10 +472,10 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 ```systemverilog
 module student_top #(
-    parameter integer ISSUE_WIDTH = 1,
+    parameter integer ISSUE_WIDTH = 2,
     parameter integer DISPATCH_WIDTH = 2,
-    parameter integer WB_WIDTH = 1,
-    parameter integer COMMIT_WIDTH = 1,
+    parameter integer WB_WIDTH = 2,
+    parameter integer COMMIT_WIDTH = 2,
 
     parameter integer ROB_DEPTH = 16,
     parameter integer PRF_SIZE = 48,
@@ -1194,4 +1194,4 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 
 历史紧凑配置（提交 f3ed8dd，D=I=W=C=1、K=1）实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。
 
-当前默认 D=2、I=W=C=1、K=4、BTB=64、BHT=256：双宽派遣与 Rename 输入重叠减少前端空拍，四个 checkpoint 允许多个未解析分支并行在途，扩大预测表减少索引冲突。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
+当前默认 D=I=W=C=2、K=4、BTB=64、BHT=256：双宽派遣与 Rename 输入重叠减少前端空拍，双宽发射/写回/提交增加后端吞吐，四个 checkpoint 允许多个未解析分支并行在途，扩大预测表减少索引冲突。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
