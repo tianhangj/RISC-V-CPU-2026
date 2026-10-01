@@ -28,6 +28,7 @@ def main():
         tests = [
             ("wb_pipeline_test", ["verilog/wb_arb.sv", "tb/wb_pipeline.sv"], []),
             ("rename_checkpoint_test", ["verilog/rename.sv", "tb/rename_checkpoint.sv"], []),
+            ("rename_stream_test", ["verilog/rename.sv", "tb/rename_stream.sv"], []),
             ("iq_alu_candidate_test", ["verilog/iq_alu.sv", "tb/iq_alu_candidate.sv"], []),
             ("iq_mem_candidate_test", ["verilog/iq_alu.sv", "verilog/iq_mem.sv", "tb/iq_mem_candidate.sv"], []),
             ("selection_tree_test", ["verilog/iq_alu.sv", "verilog/issue_sched.sv", "tb/selection_tree.sv"], []),

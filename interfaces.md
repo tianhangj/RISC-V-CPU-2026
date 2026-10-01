@@ -253,6 +253,8 @@ ROB 不输出可由尾索引推导的 D 份标签。LQ/SQ 完成顺序可以不�
 
 Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选取最大可容纳前缀，锁存 count、ROB 索引、物理目的、访存槽及 checkpoint 候选；未选后缀留在译码缓冲。每个控制流指令消耗一个 checkpoint。offer 只在 disp_valid&&disp_ready 时原子生效，背压期间内容不变。
 
+完整缓冲包派遣的同一边沿可以接收下一个译码包，下一拍使用更新后的 RAT 和空闲表生成新 offer；持续输入且资源充足时每两拍派遣一个包。派遣背压、仅派遣前缀、前端纠正或 squash 当拍不进行此替换，避免覆盖后缀或接受旧路径数据。
+
 | 投影 | 接收方 | 数据 |
 |---|---|---|
 | disp_rob[D] | ROB | rob_alloc_t |
@@ -471,7 +473,7 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 ```systemverilog
 module student_top #(
     parameter integer ISSUE_WIDTH = 1,
-    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 1,
     parameter integer COMMIT_WIDTH = 1,
 

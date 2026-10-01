@@ -122,7 +122,11 @@ module rename #(
     logic fit, stop_offer, is_branch, is_load, is_store, source1_ready, source2_ready;
     integer free_pdst, used_alu, used_mem, used_lq, used_sq, used_cp;
 
-    assign decode_ready = !buf_valid && !offer_valid && !squash_valid;
+    // Replace a fully dispatched packet at the same edge. Its successor is
+    // renamed next cycle, after this offer's RAT/free-list updates are visible.
+    assign decode_ready = !squash_valid &&
+        ((!buf_valid && !offer_valid) ||
+         (disp_valid && disp_ready && !offer_front && offer_count == buf_count));
     assign disp_valid = offer_valid && !squash_valid;
     assign disp_count = offer_count;
     assign disp_rob = offer_rob;
@@ -312,12 +316,6 @@ module rename #(
                 buf_valid <= 0;
                 offer_valid <= 0;
             end else begin
-                if (decode_valid && decode_ready) begin
-                    buf_valid <= 1;
-                    buf_count <= decode_count;
-                    for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                        buffer_uop[lane] <= decode_uop[lane*DECODE_BITS +: DECODE_BITS];
-                end
                 if (buf_valid && !offer_valid && proposed_count != 0) begin
                     offer_valid <= 1;
                     offer_count <= proposed_count;
@@ -361,6 +359,13 @@ module rename #(
                             end
                         end
                     end
+                end
+                // Acceptance wins over clearing the packet just dispatched.
+                if (decode_valid && decode_ready) begin
+                    buf_valid <= 1;
+                    buf_count <= decode_count;
+                    for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
+                        buffer_uop[lane] <= decode_uop[lane*DECODE_BITS +: DECODE_BITS];
                 end
             end
             for (int c = 0; c < CHECKPOINT_DEPTH; c = c + 1)
