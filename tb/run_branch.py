@@ -27,11 +27,12 @@ def main():
             enter_appimage(args.appimage)
         verilator = verilator_command(args.verilator)
         tests = [
-            ("branch_predictor_test", ["verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
+            ("pc_increment_test", ["verilog/pc_increment.sv", "tb/pc_increment.sv"], []),
+            ("branch_predictor_test", ["verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
             ("branch_ctrl_test", ["verilog/branch_ctrl.sv", "tb/branch_ctrl.sv"], []),
             ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], []),
             ("wb_arb_test", ["verilog/wb_arb.sv", "tb/wb_arb.sv"], []),
-            ("fetch_prediction_test", ["verilog/branch_predictor.sv", "verilog/fetch.sv",
+            ("fetch_prediction_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "verilog/fetch.sv",
                                        "tb/fetch_prediction.sv"], []),
         ]
         cpu_sources = [str(path) for path in with_ram_source(read_sources(ROOT / "verilog/filelist.f"))]

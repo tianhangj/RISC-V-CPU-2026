@@ -26,10 +26,10 @@ def main():
             enter_appimage(args.appimage)
         verilator = verilator_command(args.verilator)
         tests = [
-            ("fetch_generation", ["verilog/fetch.sv", "tb/fetch_generation.sv"]),
+            ("fetch_generation", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/fetch.sv", "tb/fetch_generation.sv"]),
             ("icache_test", ["verilog/icache.sv", "verilog/axi_bridge.sv",
                              "scripts/ram/sram_fakeram.sv", "tb/icache.sv"]),
-            ("fetch_icache_test", ["verilog/fetch.sv", "verilog/icache.sv",
+            ("fetch_icache_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/fetch.sv", "verilog/icache.sv",
                                    "scripts/ram/sram_fakeram.sv", "tb/fetch_icache.sv"]),
         ]
         output = args.build.resolve()

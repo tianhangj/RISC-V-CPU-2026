@@ -24,7 +24,15 @@ module branch_predictor #(
     logic [1:0] bht [0:BHT_ENTRIES-1];
 
     for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_lookup
-        wire [31:0] pc = lookup_pc + 32'(lane*4);
+        wire [31:0] pc, sequential_pc;
+        if (lane == 0) begin : g_base_pc
+            assign pc = lookup_pc;
+        end else begin : g_offset_pc
+            (* keep_hierarchy, keep *) pc_increment #(.WORDS(lane)) increment_lookup (
+                .pc(lookup_pc), .next_pc(pc));
+        end
+        (* keep_hierarchy, keep *) pc_increment #(.WORDS(lane+1)) increment_next (
+            .pc(lookup_pc), .next_pc(sequential_pc));
         wire [BIW-1:0] bi = pc[2 +: BIW];
         wire [HIW-1:0] hi = pc[2 +: HIW];
         // Decode each index once; avoid binary mux address bits driving every
@@ -50,7 +58,7 @@ module branch_predictor #(
             assign target_word[entry] = btb_target[entry] & {32{hit[entry]}};
         end
         assign pred_taken[lane] = BP_ENABLE != 0 && pc[31:28] == 0 && (|hit);
-        assign pred_npc[lane*32 +: 32] = pred_taken[lane] ? target : pc+32'd4;
+        assign pred_npc[lane*32 +: 32] = pred_taken[lane] ? target : sequential_pc;
     end
 
     for (genvar entry = 0; entry < BTB_ENTRIES; entry = entry+1) begin : g_btb

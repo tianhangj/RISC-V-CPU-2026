@@ -4,6 +4,7 @@
 # student_top.sv
 # core.sv
 signal_fanout.sv
+pc_increment.sv
 decode.sv
 alu.sv
 mul_div.sv

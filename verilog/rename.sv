@@ -120,7 +120,8 @@ module rename #(
     logic [CIDW-1:0] cp_id;
     logic [1:0] kind;
     logic fit, stop_offer, is_branch, is_load, is_store, source1_ready, source2_ready;
-    integer free_pdst, used_alu, used_mem, used_lq, used_sq, used_cp;
+    integer free_pdst;
+    logic [DCW-1:0] used_alu, used_mem, used_lq, used_sq, used_cp;
 
     // Replace a fully dispatched packet at the same edge. Its successor is
     // renamed next cycle, after this offer's RAT/free-list updates are visible.
@@ -210,6 +211,9 @@ module rename #(
                 ((is_load || is_store) ? used_mem < mem_iq_free : used_alu < alu_iq_free) &&
                 (is_load ? used_lq < lq_free : 1'b1) &&
                 (is_store ? used_sq < sq_free : 1'b1);
+            // Prepare the free-list prefix independently of queue credits.
+            // A rejected lane stops the offer, so its suffix is unpublished.
+            if (rd != 0 && free_pdst >= 0) free_tmp[PW'(free_pdst)] = 0;
             if (fit) begin
                 tag = rob_tail + lane;
                 ps1 = rat_tmp[rs1];
@@ -218,21 +222,20 @@ module rename #(
                 old_pdst = (rd == 0) ? 0 : rat_tmp[rd];
                 if (rd != 0) begin
                     rat_tmp[rd] = pdst;
-                    free_tmp[pdst] = 0;
                 end
                 mem_id = 0; sq_id = 0; cp_id = 0;
-                if (is_load) begin mem_id = lq_alloc_id[used_lq*LIDW +: LIDW]; used_lq = used_lq + 1; end
+                if (is_load) begin mem_id = lq_alloc_id[used_lq*LIDW +: LIDW]; used_lq = used_lq + 1'b1; end
                 if (is_store) begin
                     mem_id = sq_alloc_id[used_sq*SIDW +: SIDW];
                     sq_id = mem_id[SIDW-1:0];
-                    used_sq = used_sq + 1;
+                    used_sq = used_sq + 1'b1;
                 end
                 if (is_branch) begin
                     cp_id = cp_alloc_id[used_cp*CIDW +: CIDW];
-                    used_cp = used_cp + 1;
+                    used_cp = used_cp + 1'b1;
                 end
-                if (is_load || is_store) used_mem = used_mem + 1;
-                else used_alu = used_alu + 1;
+                if (is_load || is_store) used_mem = used_mem + 1'b1;
+                else used_alu = used_alu + 1'b1;
                 proposed_count = proposed_count + 1'b1;
                 proposed_rd[lane] = rd;
                 proposed_pdst[lane] = pdst;

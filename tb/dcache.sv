@@ -14,7 +14,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
     wire [31:0] araddr, awaddr, wdata;
     wire [3:0] wstrb;
     wire arvalid, arready, rready, awvalid, awready, wvalid, wready, bready;
-    reg [31:0] memory [0:2047];
+    reg [31:0] memory [0:16383];
     reg [31:0] ra [0:31], wa [0:31], wd [0:31];
     reg [3:0] wm [0:31];
     integer rdue [0:31], bdue [0:31];
@@ -60,7 +60,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         aw_stalled <= awvalid && !awready; saved_aw <= awaddr;
         w_stalled <= wvalid && !wready; saved_w <= wdata; saved_mask <= wstrb;
         if (arvalid && arready) begin
-            if (araddr[1:0] != 0 || araddr >= 8192) $fatal(1, "bad refill address");
+            if (araddr[1:0] != 0 || araddr >= 65536) $fatal(1, "bad refill address");
             ra[rt] <= araddr; rdue[rt] <= cycles+10; rt <= (rt+1)%32; reads <= reads+1;
         end
         if (rvalid && rready) rh <= (rh+1)%32;
@@ -78,7 +78,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
                     $fatal(1, "MMIO lost a dirty line from another tag group");
                 exits <= exits+1;
             end else begin
-                if (wa[ah] >= 8192 || wa[ah][1:0] != 0) $fatal(1, "bad writeback address");
+                if (wa[ah] >= 65536 || wa[ah][1:0] != 0) $fatal(1, "bad writeback address");
                 for (integer b = 0; b < 4; b = b+1)
                     if (wm[wh][b]) memory[wa[ah] >> 2][8*b +: 8] <= wd[wh][8*b +: 8];
                 writes <= writes+1;
@@ -110,9 +110,42 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         while (!st_rsp_valid) @(negedge clock);
         @(posedge clock);
     endtask
+    // Keep the next request asserted while a preceding miss fills the cache.
+    // Check responses independently of acceptance, including early miss data.
+    task automatic load_stream;
+        reg [31:0] addresses [0:5];
+        integer sent, returned;
+        addresses[0] = 0;
+        addresses[1] = SETS*LINE;
+        addresses[2] = 0;
+        addresses[3] = LINE;
+        addresses[4] = SETS*LINE+4;
+        addresses[5] = SETS*LINE+8;
+        sent = 0;
+        returned = 0;
+        @(negedge clock);
+        ld_req_valid = 1;
+        ld_req_payload = {16'h9000, 2'd0, addresses[0]};
+        while (returned < 6) begin
+            @(posedge clock);
+            if (ld_rsp_valid) begin
+                if (ld_rsp_payload !== {16'(16'h9000+returned), 2'(returned),
+                                        memory[addresses[returned] >> 2]})
+                    $fatal(1, "stream response changed across hit/miss SETS=%0d index=%0d",
+                           SETS, returned);
+                returned = returned+1;
+            end
+            if (ld_req_valid && ld_req_ready) sent = sent+1;
+            @(negedge clock);
+            ld_req_valid = sent < 6;
+            if (sent < 6)
+                ld_req_payload = {16'(16'h9000+sent), 2'(sent), addresses[sent]};
+        end
+        while (dut.state != 0) @(negedge clock);
+    endtask
     initial begin
         done = 0;
-        for (integer i = 0; i < 2048; i = i+1) memory[i] = 32'ha5000000+32'(4*i);
+        for (integer i = 0; i < 16384; i = i+1) memory[i] = 32'ha5000000+32'(4*i);
         repeat (3) @(posedge clock);
         @(negedge clock) reset = 0;
         load(0, 32'ha5000000, 16'hffff, 0);
@@ -127,10 +160,10 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         for (integer i = 0; i < 4; i = i+1) begin
             @(negedge clock);
             ld_req_valid = 1;
-            ld_req_payload = {16'(16'h1000+i), 2'(i), 32'd0};
+            ld_req_payload = {16'(16'h1000+i), 2'(i), 32'(4*i)};
             if (!ld_req_ready) $fatal(1, "cache hit throughput bubble");
             @(posedge clock); #1;
-            if (!ld_rsp_valid || ld_rsp_payload !== {16'(16'h1000+i), 2'(i), 32'ha5000000})
+            if (!ld_rsp_valid || ld_rsp_payload !== {16'(16'h1000+i), 2'(i), 32'(32'ha5000000+4*i)})
                 $fatal(1, "back-to-back hit identity corrupted");
         end
         @(negedge clock) ld_req_valid = 0;
@@ -161,16 +194,18 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         load(0, 32'hdeadbbef, 16'h5555, 0);
         while (dut.state != 0) @(negedge clock);
         if (reads != reads_before+LINE/4) $fatal(1, "reset retained valid cache entry");
+        load_stream();
         $display("PASS dcache LINE=%0d SETS=%0d", LINE, SETS);
         done = 1;
     end
 endmodule
 module dcache_test;
-    wire [4:0] done;
+    wire [5:0] done;
     dcache_case #(.LINE(16)) a(done[0]);
     dcache_case #(.LINE(32)) b(done[1]);
     dcache_case #(.LINE(64)) c(done[2]);
     dcache_case #(.LINE(32), .SETS(1)) d(done[3]);
     dcache_case #(.LINE(32), .SETS(32)) e(done[4]);
+    dcache_case #(.LINE(32), .SETS(512)) f(done[5]);
     initial begin wait (&done); $finish; end
 endmodule

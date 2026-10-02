@@ -6,6 +6,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
     logic [D*117-1:0] decode_uop = 0;
     logic [5:0] rob_free = 32;
     logic [4:0] rob_tail = 0;
+    logic [4:0] alu_iq_free = 16, mem_iq_free = 16;
     wire decode_ready, disp_valid, front_redirect_valid;
     wire [DCW-1:0] disp_count;
     wire [D*95-1:0] disp_alu;
@@ -18,7 +19,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         .clock, .reset, .squash_valid, .restore_cp_id(2'd0), .cp_release_mask(4'd0),
         .cp_free(3'd4), .cp_alloc_id({D{2'd0}}),
         .decode_valid, .decode_ready, .decode_count(DCW'(D)), .decode_uop,
-        .rob_free, .rob_tail, .alu_iq_free(5'd16), .mem_iq_free(5'd16),
+        .rob_free, .rob_tail, .alu_iq_free, .mem_iq_free,
         .lq_free(4'd8), .sq_free(4'd8), .lq_alloc_id({D{3'd0}}), .sq_alloc_id({D{3'd0}}),
         .disp_valid, .disp_ready, .disp_count, .disp_alu, .disp_src1_ready,
         .front_redirect_valid, .wake_valid(1'b0), .wake_pdst(6'd0),
@@ -40,6 +41,8 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         disp_ready = 0;
         squash_valid = 0;
         rob_free = 32;
+        alu_iq_free = 16;
+        mem_iq_free = 16;
         measure = 0;
         tick();
         @(negedge clock) reset = 0;
@@ -103,6 +106,36 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         while (dispatched < 6*D) tick();
         tick();
         if (disp_valid || !decode_ready) $fatal(1, "D=%0d successor packet lost or duplicated", D);
+
+        // Preparing destinations while credits are zero must not consume them.
+        // Reopening one credit publishes only the prefix and preserves RAWs.
+        restart();
+        alu_iq_free = 0;
+        decode_valid = 1;
+        tick();
+        @(negedge clock) decode_valid = 0;
+        repeat (3) tick();
+        if (disp_valid) $fatal(1, "D=%0d zero queue credits admitted an offer", D);
+        @(negedge clock) alu_iq_free = 1;
+        tick();
+        if (!disp_valid || disp_count != 1 ||
+            disp_alu[64+12 +: 6] !== 6'd32 || disp_alu[64+6 +: 6] !== 6'd1)
+            $fatal(1, "D=%0d credit stall consumed a prepared destination", D);
+        held = disp_alu;
+        @(negedge clock) alu_iq_free = 0;
+        repeat (2) begin
+            tick();
+            if (!disp_valid || disp_alu !== held)
+                $fatal(1, "D=%0d credit change overwrote a held offer", D);
+        end
+        @(negedge clock);
+        alu_iq_free = 1;
+        disp_ready = 1;
+        tick();
+        tick();
+        if (D > 1 && (!disp_valid || disp_count != 1 ||
+                      disp_alu[64+12 +: 6] !== 6'd33 || disp_alu[64+6 +: 6] !== 6'd32))
+            $fatal(1, "D=%0d credit-limited suffix lost its destination or RAW", D);
 
         // A short offer retains its suffix and must not admit a successor.
         if (D > 1) begin

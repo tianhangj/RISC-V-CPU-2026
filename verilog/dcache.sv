@@ -1,4 +1,4 @@
-// Blocking, direct-mapped write-back cache. Hits accept one word per cycle;
+// Blocking, direct-mapped write-back cache. Load hits accept one word per cycle;
 // a miss transfers a complete line through the pipelined AXI bridge.
 module dcache #(
     parameter integer SIZE_BYTES = 4096,
@@ -40,10 +40,9 @@ module dcache #(
     localparam integer COUNT_W = $clog2(WORDS + 1);
     localparam [3:0] IDLE = 0, VICTIM = 1, WRITEBACK = 2,
         WRITE_WAIT = 3, REFILL = 4, INSTALL = 5, FLUSH_SCAN = 6,
-        IO_SEND = 7, IO_WAIT = 8;
+        IO_SEND = 7, IO_WAIT = 8, PROBE = 9;
     reg [3:0] state;
     reg [SETS-1:0] valid, dirty;
-    reg [TAG_W-1:0] tags [0:SETS-1];
     reg [31:0] request_addr, request_data;
     reg [3:0] request_mask;
     reg [GEN_WIDTH+LIDW-1:0] request_identity;
@@ -52,72 +51,35 @@ module dcache #(
     reg [TAG_W-1:0] victim_tag;
     reg [LINE_BITS-1:0] victim_data;
     reg [COUNT_W-1:0] sent_count, received_count;
-    reg [31:0] refill_word;
-    reg hit_pending, miss_pending, store_pending;
-    reg [GEN_WIDTH+LIDW-1:0] hit_identity;
-    reg [WORD_W-1:0] hit_word;
+    reg miss_pending, store_pending;
     reg [LD_BITS-1:0] miss_response;
 
     wire [31:0] lookup_addr = st_req_valid ? st_req_payload[67:36] : ld_req_payload[31:0];
     wire [SET_W-1:0] lookup_set = SET_W'((lookup_addr >> OFFSET_W) & (SETS-1));
-    wire [TAG_W-1:0] lookup_tag = lookup_addr[31 -: TAG_W];
-    wire [WORD_W-1:0] lookup_word = WORD_W'((lookup_addr >> 2) & (WORDS-1));
     wire [SET_W-1:0] request_set = SET_W'((request_addr >> OFFSET_W) & (SETS-1));
     wire [WORD_W-1:0] request_word = WORD_W'((request_addr >> 2) & (WORDS-1));
     wire [WORD_W-1:0] response_word = mem_ld_rsp_payload[32 +: WORD_W];
     wire [WORD_W-1:0] refill_index = request_word + WORD_W'(sent_count);
-    localparam integer TAG_GROUP_SIZE = 16;
-    localparam integer TAG_GROUPS = (SETS+TAG_GROUP_SIZE-1)/TAG_GROUP_SIZE;
-    wire [TAG_W-1:0] lookup_group_tag [0:TAG_GROUPS-1];
-    wire [TAG_W-1:0] install_group_tag [0:TAG_GROUPS-1];
-    wire [TAG_GROUPS-1:0] lookup_group_select, install_group_select;
-    wire [TAG_GROUPS-1:0] install_group_enable, store_group_enable, clear_group_enable;
-    wire [TAG_GROUP_SIZE-1:0] lookup_low_select, install_low_select, clear_low_select;
+    // Read tag and data together at acceptance. PROBE publishes a hit in
+    // the following cycle and can accept the next load at the same edge.
+    wire [TAG_W-1:0] tag_rdata;
+    wire lookup_hit = valid[request_set] &&
+        tag_rdata == request_addr[31 -: TAG_W];
+    wire hit_load = state == PROBE && lookup_hit && !request_store;
+    wire hit_store = state == PROBE && lookup_hit && request_store;
     wire writeback_complete = state == WRITE_WAIT &&
         (received_count == WORDS || (mem_st_rsp_valid && received_count == WORDS-1));
-    for (genvar low = 0; low < TAG_GROUP_SIZE; low = low+1) begin : g_low_decode
-        assign lookup_low_select[low] = (lookup_set & SET_W'(TAG_GROUP_SIZE-1)) == SET_W'(low);
-        assign install_low_select[low] = (request_set & SET_W'(TAG_GROUP_SIZE-1)) == SET_W'(low);
-        assign clear_low_select[low] = (victim_set & SET_W'(TAG_GROUP_SIZE-1)) == SET_W'(low);
-    end
-    for (genvar group = 0; group < TAG_GROUPS; group = group+1) begin : g_tag_group
-        assign lookup_group_select[group] = (lookup_set >> 4) == group;
-        assign install_group_select[group] = (request_set >> 4) == group;
-        // Retain the group boundary so mapping preserves the local load on
-        // each tag bit and phase enable instead of distributing one driver.
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(TAG_W)) lookup_mask (
-            .data(lookup_tag), .enable(lookup_group_select[group]), .masked(lookup_group_tag[group]));
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(TAG_W)) install_mask (
-            .data(request_addr[31 -: TAG_W]), .enable(install_group_select[group]),
-            .masked(install_group_tag[group]));
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) install_enable (
-            .data(state == INSTALL), .enable(install_group_select[group]), .masked(install_group_enable[group]));
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) store_enable (
-            .data(accept_store && ram_address), .enable(lookup_group_select[group]),
-            .masked(store_group_enable[group]));
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) clear_enable (
-            .data(writeback_complete), .enable((victim_set >> 4) == group),
-            .masked(clear_group_enable[group]));
-    end
-    reg lookup_hit;
+    wire tag_en = (accept && ram_address) || state == INSTALL ||
+        (state == FLUSH_SCAN && flush_valid[1]);
+    wire [SET_W-1:0] tag_addr = state == INSTALL ? request_set :
+        state == FLUSH_SCAN ? flush_choice : lookup_set;
+    sram_fakeram #(.DEPTH(SETS), .WIDTH(TAG_W)) tag_ram (
+        .clk(clock), .en(tag_en), .we(state == INSTALL), .wmask(1'b1),
+        .addr(tag_addr), .wdata(request_addr[31 -: TAG_W]), .rdata(tag_rdata));
     localparam integer TREE_LEAVES = 2 ** $clog2(SETS);
     reg flush_valid [1:2*TREE_LEAVES-1];
     reg [SET_W-1:0] flush_index [1:2*TREE_LEAVES-1];
     wire [SET_W-1:0] flush_choice = flush_index[1];
-    reg [TAG_W-1:0] lookup_victim_tag, flush_victim_tag;
-    // Compare within each set, avoiding a wide binary tag read mux.
-    always @* begin
-        lookup_hit = 0;
-        lookup_victim_tag = 0;
-        flush_victim_tag = 0;
-        for (integer s = 0; s < SETS; s = s+1) begin
-            lookup_hit = lookup_hit | (lookup_group_select[s/TAG_GROUP_SIZE] &&
-                lookup_low_select[s%TAG_GROUP_SIZE] && valid[s] &&
-                tags[s] == lookup_group_tag[s/TAG_GROUP_SIZE]);
-            lookup_victim_tag = lookup_victim_tag | (tags[s] & {TAG_W{lookup_set == SET_W'(s)}});
-            flush_victim_tag = flush_victim_tag | (tags[s] & {TAG_W{flush_choice == SET_W'(s)}});
-        end
-    end
     always @* begin
         for (integer s = 0; s < TREE_LEAVES; s = s+1) begin
             flush_valid[TREE_LEAVES+s] = (s < SETS) ? dirty[s] : 1'b0;
@@ -128,16 +90,17 @@ module dcache #(
             flush_index[n] = flush_valid[2*n] ? flush_index[2*n] : flush_index[2*n+1];
         end
     end
-    assign st_req_ready = state == IDLE;
-    assign ld_req_ready = state == IDLE && !st_req_valid;
+    assign st_req_ready = state == IDLE || hit_load;
+    assign ld_req_ready = st_req_ready && !st_req_valid;
     wire accept_store = st_req_valid && st_req_ready;
     wire accept_load = ld_req_valid && ld_req_ready;
     wire accept = accept_store || accept_load;
     wire ram_address = lookup_addr[31:28] == 0;
-    assign ld_rsp_valid = hit_pending || miss_pending;
-    assign ld_rsp_payload = hit_pending ?
-        {hit_identity, ram_rdata[32*hit_word +: 32]} : miss_response;
-    assign st_rsp_valid = store_pending;
+    assign ld_rsp_valid = hit_load || miss_pending;
+    assign ld_rsp_payload = hit_load ?
+        {request_identity, ram_rdata[32*request_word +: 32]} : miss_response;
+    // A hit completes at the same edge that performs its SRAM write.
+    assign st_rsp_valid = hit_store || store_pending;
 
     reg ram_en, ram_we;
     reg [SET_W-1:0] ram_addr;
@@ -150,13 +113,13 @@ module dcache #(
         ram_addr = lookup_set;
         ram_mask = 0;
         ram_wdata = 0;
-        if (state == IDLE && accept && ram_address) begin
+        if (accept && ram_address) ram_en = 1;
+        if (hit_store) begin
             ram_en = 1;
-            if (lookup_hit && accept_store) begin
-                ram_we = 1;
-                ram_mask[4*lookup_word +: 4] = st_req_payload[3:0];
-                ram_wdata[32*lookup_word +: 32] = st_req_payload[35:4];
-            end
+            ram_we = 1;
+            ram_addr = request_set;
+            ram_mask[4*request_word +: 4] = request_mask;
+            ram_wdata[32*request_word +: 32] = request_data;
         end
         if (state == FLUSH_SCAN) begin
             ram_en = flush_valid[1];
@@ -177,11 +140,10 @@ module dcache #(
             ram_wdata[32*request_word +: 32] = request_data;
         end
     end
-    // Read hits access one word bank; victim reads access the complete line.
+    // Tag lookup reads all words, so a dirty miss already has its victim.
     // Each enable/address driver sees only the four byte macros of its bank.
     for (genvar word = 0; word < WORDS; word = word+1) begin : g_data_word
-        wire bank_selected = ram_we ? (|ram_mask[word*4 +: 4]) :
-            ((state == IDLE && lookup_hit) ? lookup_word == WORD_W'(word) : 1'b1);
+        wire bank_selected = !ram_we || (|ram_mask[word*4 +: 4]);
         wire bank_en;
         wire [SET_W-1:0] bank_addr;
         (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) enable_mask (
@@ -206,15 +168,8 @@ module dcache #(
     wire write_fire = mem_st_req_valid && mem_st_req_ready;
 
     always @(posedge clock) begin
-        hit_pending <= 0;
         miss_pending <= 0;
         store_pending <= 0;
-        if (accept_load && lookup_hit && ram_address) begin
-            hit_pending <= 1;
-            hit_identity <= ld_req_payload[LD_BITS-1:32];
-            hit_word <= lookup_word;
-        end
-        if (accept_store && lookup_hit && ram_address) store_pending <= 1;
         if (accept) begin
             request_addr <= lookup_addr;
             request_data <= st_req_payload[35:4];
@@ -222,9 +177,11 @@ module dcache #(
             request_identity <= ld_req_payload[LD_BITS-1:32];
             request_store <= accept_store;
         end
-        if (state == VICTIM) victim_data <= ram_rdata;
+        if (state == VICTIM || (state == PROBE && !lookup_hit)) begin
+            victim_data <= ram_rdata;
+            victim_tag <= tag_rdata;
+        end
         if (state == REFILL && mem_ld_rsp_valid && response_word == request_word) begin
-            refill_word <= mem_ld_rsp_payload[31:0];
             // Publish the critical word immediately; the remaining words still
             // fill the cache, even if the requesting load has been squashed.
             if (!request_store) begin
@@ -234,7 +191,6 @@ module dcache #(
         end
         if (reset) begin
             state <= IDLE;
-            hit_pending <= 0;
             miss_pending <= 0;
             store_pending <= 0;
             sent_count <= 0;
@@ -242,17 +198,21 @@ module dcache #(
             flushing <= 0;
         end else begin
             case (state)
-                IDLE: if (accept) begin
-                    if (!ram_address) begin
-                        flushing <= 1;
-                        state <= FLUSH_SCAN;
-                    end else if (!lookup_hit) begin
-                        victim_set <= lookup_set;
-                        victim_tag <= lookup_victim_tag;
+                IDLE, PROBE: begin
+                    if (state == PROBE && !lookup_hit) begin
+                        victim_set <= request_set;
                         sent_count <= 0;
                         received_count <= 0;
                         flushing <= 0;
-                        state <= (valid[lookup_set] && dirty[lookup_set]) ? VICTIM : REFILL;
+                        state <= dirty[request_set] ? WRITEBACK : REFILL;
+                    end else begin
+                        state <= IDLE;
+                        if (accept) begin
+                            if (!ram_address) begin
+                                flushing <= 1;
+                                state <= FLUSH_SCAN;
+                            end else state <= PROBE;
+                        end
                     end
                 end
                 VICTIM: begin
@@ -292,7 +252,6 @@ module dcache #(
                 FLUSH_SCAN: begin
                     if (flush_valid[1]) begin
                         victim_set <= flush_choice;
-                        victim_tag <= flush_victim_tag;
                         state <= VICTIM;
                     end else state <= IO_SEND;
                 end
@@ -305,25 +264,37 @@ module dcache #(
             endcase
         end
     end
-    // Static tag writes avoid memory-lowering read/write collision muxes.
-    for (genvar s = 0; s < SETS; s = s+1) begin : g_tag
-        always @(posedge clock)
-            if (install_group_enable[s/TAG_GROUP_SIZE] && install_low_select[s%TAG_GROUP_SIZE])
-                tags[s] <= install_group_tag[s/TAG_GROUP_SIZE];
+    // Only valid and dirty need reset; tag SRAM contents stay unspecified.
+    // Local enables bound the load of the controller's phase signals.
+    localparam integer GROUP_SIZE = 16;
+    localparam integer GROUPS = (SETS+GROUP_SIZE-1)/GROUP_SIZE;
+    wire [GROUPS-1:0] install_enable, store_enable, clear_enable;
+    for (genvar group = 0; group < GROUPS; group = group+1) begin : g_control_group
+        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) install_mask (
+            .data(state == INSTALL), .enable((request_set >> 4) == group),
+            .masked(install_enable[group]));
+        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) store_mask (
+            .data(hit_store), .enable((request_set >> 4) == group),
+            .masked(store_enable[group]));
+        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) clear_mask (
+            .data(writeback_complete), .enable((victim_set >> 4) == group),
+            .masked(clear_enable[group]));
+    end
+    for (genvar s = 0; s < SETS; s = s+1) begin : g_control
+        wire request_low = (request_set & SET_W'(15)) == SET_W'(s%GROUP_SIZE);
+        wire victim_low = (victim_set & SET_W'(15)) == SET_W'(s%GROUP_SIZE);
         always @(posedge clock) begin
-            if (reset) dirty[s] <= 0;
-            else begin
-                // On a miss this bit is private to the busy controller until
-                // INSTALL; it need not wait for the wide hit reduction.
-                if (store_group_enable[s/TAG_GROUP_SIZE] && lookup_low_select[s%TAG_GROUP_SIZE])
-                    dirty[s] <= 1;
-                if (clear_group_enable[s/TAG_GROUP_SIZE] && clear_low_select[s%TAG_GROUP_SIZE]) dirty[s] <= 0;
-                if (install_group_enable[s/TAG_GROUP_SIZE] && install_low_select[s%TAG_GROUP_SIZE])
+            if (reset) begin
+                dirty[s] <= 0;
+                valid[s] <= 0;
+            end else begin
+                if (store_enable[s/GROUP_SIZE] && request_low) dirty[s] <= 1;
+                if (clear_enable[s/GROUP_SIZE] && victim_low) dirty[s] <= 0;
+                if (install_enable[s/GROUP_SIZE] && request_low) begin
                     dirty[s] <= request_store;
+                    valid[s] <= 1;
+                end
             end
-            if (reset) valid[s] <= 0;
-            else if (install_group_enable[s/TAG_GROUP_SIZE] && install_low_select[s%TAG_GROUP_SIZE])
-                valid[s] <= 1;
         end
     end
 endmodule

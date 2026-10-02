@@ -1,6 +1,6 @@
 # RV32IM 指令缓存乱序核接口规范
 
-版本：v1.8.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.8.1。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
@@ -386,7 +386,7 @@ size 为本地译码结果，不是流水接口字段。Load 按大小截取并�
 
 LSU 只有一个 result_t 输出缓冲，为空或本拍被接收时可填入下一项；从数据就绪的 LQ 和地址/数据就绪的 SQ 中选最老且完成未发送的项；载荷从队列记录取 tag/pdst，Store 的 pdst=0。完成被 wb_arb 接收后，Load 立即释放 LQ；Store 标记执行完成已发送并继续保留 SQ。LQ 不必等退休，已返回的读事务不存在迟到响应。
 
-SQ 接收头部 st_start_id 后建立仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。请求由 DCache 接收，RAM 命中在更新 SRAM 后产生 st_rsp_valid，缺失在完成填充与写分配后返回完成。LSU 向 ROB 发 st_done_valid 并释放 SQ，相关 Load 依赖解除。MMIO 地址由 DCache 先排空脏行，再透传 AW/W/B，等待自身 B 才完成。结果/Load offer 缓冲支持接收与补入同拍；已暂存的 Load 不会再次选中。
+SQ 接收头部 st_start_id 后建立仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。请求由 DCache 接收，RAM 命中的 st_rsp_valid 在 SRAM 更新边沿接收，缺失在完成填充与写分配后返回完成。LSU 向 ROB 发 st_done_valid 并释放 SQ，相关 Load 依赖解除。MMIO 地址由 DCache 先排空脏行，再透传 AW/W/B，等待自身 B 才完成。结果/Load offer 缓冲支持接收与补入同拍；已暂存的 Load 不会再次选中。
 
 错误路径 Store 不会取得头部授权，任意地址仅保留在 SQ。正确路径合法退出 SW 也遵守相同授权及 AW/W/B 协议。LSU 不检查授权地址或标签的一致性，不为冗余核对传递副本。
 
@@ -1199,13 +1199,15 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 
 当前工作配置为 D=4、I=W=C=2、R=32、P=64、LQ=SQ=8、F=16。调度器、LSU 结果及请求缓冲支持消费与补入同拍；Rename/ROB/IQ 的空闲槽提前准备载荷，仅有效位发布派遣，不覆盖仍被使用的槽或背压 offer。
 
-DCache 为直接映射、write-back/write-allocate，数据按行内字分为独立的单端口同步 sram_fakeram bank。命中只访问对应字 bank，victim 读取全部 bank；地址/使能在 bank 内分发。tag 比较和更新以 16 组为单位分发控制和 tag 数据。命中接受一条字请求/拍，Store 按 byte strobe 更新对应字。一次 miss 占用控制器；脏 victim 逐字写回并等待全部 B，再从请求字开始环绕填充整行。Load 关键字返回时立即以原始 {gen,LQ id} 回复 LSU，其余字继续填充。恢复不取消物理填充，不丢失已提交脏数据。复位清 valid/dirty/control，不清 SRAM/tag。非 RAM Store 先排空全部脏行，再发送原始 MMIO 写，等待自身 B 完成。
+DCache 为直接映射、write-back/write-allocate，数据按行内字分为独立的单端口同步 sram_fakeram bank，tag 使用独立同步 sram_fakeram（DEPTH=组数，WIDTH=tag 位宽）；valid/dirty 使用寄存器，更新控制以 16 组为单位分发。接受 RAM 请求的边沿同步读取 tag 和整行数据，并锁存地址、Store 数据/strobe 或 Load 的 {gen,LQ id}。下一周期 PROBE 根据锁存地址的 valid 和 SRAM tag 判断命中，Load 命中当周期回复；该 Load 命中周期可同时接受下一条请求，连续 Load 命中仍为一条/拍。Store 命中在 PROBE 周期拉高 st_rsp_valid，接收完成事件的上升沿按 byte strobe 同步更新对应字 bank，期间背压下一条请求；完成事件不额外寄存一拍。miss 的 PROBE 周期背压，不会接受或覆盖下一条请求；脏 victim 的 tag/数据从该次同步读锁存。MMIO 排空时同步读取选定脏行的 tag/数据，再进入写回。
+
+一次 miss 占用控制器；脏 victim 逐字写回并等待全部 B，再从请求字开始环绕填充整行。Load 关键字返回时立即以原始 {gen,LQ id} 回复 LSU，其余字继续填充。INSTALL 边沿写入 tag SRAM 并设置 valid/dirty；Store miss 同边沿写入对应字。恢复不取消物理填充，不丢失已提交脏数据。复位清 valid/dirty/control，不清数据/tag SRAM。非 RAM Store 先排空全部脏行，再发送原始 MMIO 写，等待自身 B 完成。DCache 外部端口与载荷位布局不变。
 
 CPU ld_req/ld_rsp 为 GEN_WIDTH+LIDW+32 位；Cache 到桥的 mem_ld_req/mem_ld_rsp 为 GEN_WIDTH+WORD_W+32，id 表示行内字号。请求保持到 ready，响应无 ready、每笔只发一次。Cache 的 st_rsp 表示 RAM 更新或 MMIO 完成；桥的 mem_st_rsp 始终表示真实 B 握手。
 
-`make test-timing` 增加 tb/dcache.sv，以 SV2005 覆盖 16/32/64 B 行和单组配置、关键字提前返回、脏替换、byte 合并、复位、MMIO 排空，跨 tag 控制分组的脏写排空，以及深度 3 写队列的 AW/W 独立背压和回绕。还包含 LSU generation/Store 消歧测试：恢复边沿已接受的 RAM 读保持旧身份返回，清除的槽只归还额度；复用槽以新 generation 接收新响应。
+`make test-timing` 增加 tb/dcache.sv，以 SV2005 覆盖 16/32/64 B 行、单组和 512 组配置、关键字提前返回、连续命中切换字地址、跨命中/miss 的持续请求及返回身份、脏替换、byte 合并、复位、MMIO 排空，跨控制分组的脏写排空，以及深度 3 写队列的 AW/W 独立背压和回绕。还包含 LSU generation/Store 消歧测试：恢复边沿已接受的 RAM 读保持旧身份返回，清除的槽只归还额度；复用槽以新 generation 接收新响应。
 
-2026-10-02 中间验证：组合候选/写回、PRF 写入旁路版本六项 make perf 的 IPC 几何平均为 0.6259，19 项 make test 全通过。随后按字分 bank、恢复边沿读请求身份过滤和队列排名分配版本的 IPC 为 0.6202。按字分 bank 版本 estimated_fmax_mhz=80.55、minimum_period_ns=12.4149、worst_setup_slack_ns=-9.0813（3.333 ns 目标），尚未达标。截至本次暂停，完成结果直接转发阶段的六项 IPC 为 0.6208，19 项 correctness 全通过；最终控制分发 RTL 的 3.333 ns 综合估计为 114.11 MHz，minimum_period_ns=8.7638、worst_setup_slack_ns=-5.4307，总面积 30221.24 μm²，报告输入 SHA-256 与当前源码一致。开发已暂停，300 MHz 尚未达到，不能以性能结果或 make synth 返回码宣称目标已完成。历史 ccb3088 的 411.98 MHz 使用了之后被撤销的映射设置，不证明当前频率达标；验收保持原 scripts/synth.py、ASAP7/OpenSTA 约束和全六项性能统计。
+2026-10-02 上轮开发记录：组合候选/写回、PRF 写入旁路版本六项 make perf 的 IPC 几何平均为 0.6259，19 项 make test 全通过。随后按字分 bank、恢复边沿读请求身份过滤和队列排名分配版本的 IPC 为 0.6202。按字分 bank 版本 estimated_fmax_mhz=80.55、minimum_period_ns=12.4149、worst_setup_slack_ns=-9.0813（3.333 ns 目标），尚未达标。上轮暂停时，完成结果直接转发阶段的六项 IPC 为 0.6208，19 项 correctness 全通过；控制分发 RTL 的 3.333 ns 综合估计为 114.11 MHz，minimum_period_ns=8.7638、worst_setup_slack_ns=-5.4307，总面积 30221.24 μm²，报告输入 SHA-256 与当时源码一致。该结果未达到 300 MHz，不能以性能结果或 make synth 返回码宣称目标已完成。历史 ccb3088 的 411.98 MHz 使用了之后被撤销的映射设置，不证明当前频率达标；验收保持原 scripts/synth.py、ASAP7/OpenSTA 约束和全六项性能统计。本轮结果见第 18.3 节。
 
 ### 18.1 `dcache`
 
@@ -1248,6 +1250,30 @@ endmodule
 
 signal_fanout 使用分支数最多为 4 的树，每条支路由两个反相器组成。keep_hierarchy/keep 保留缓冲边界，使标准单元映射后仍有真实的分发级；无状态、无协议延迟。ROB head 与恢复广播分别向各后端消费者分发；发射队列和调度器的选择及载荷使能按最多 16 位一组分发，PRF 的 bank 选择、写入数据和逐字写使能也分组分发。所有缓冲均参与原综合脚本的面积和 OpenSTA 时序统计。
 
+Fetch 的 create_count 使用 CNT(D) 位，credits_used 使用 CNT(IFETCH_OUTSTANDING+D) 位；合法响应只归还已接受的当前 generation 指令额度。容量和行尾限制使用与常数边界的比较，不生成 32 位额度减法。队列及 outstanding 的更新按各自计数位宽运算，外部 count 和载荷位布局不变。输出包载荷不对无效 lane 清零，以 count 指定有效前缀；输出锁存使能通过 signal_fanout 按最多 16 位一组分发，阻塞期间仍保持已发布包不变。
+
+Fetch 将 RAM PC 条件与每 lane 的 pred_taken 合并后，经 signal_fanout 分别传给创建控制和每个槽的 NPC 字段；32 位 NPC 按两个 16 位组选择，slot_taken 共享该槽低位组的控制。该分发树只含组合缓冲，不改变预测、创建或槽发布的周期。
+
+Fetch 与 branch_predictor 的连续 PC 和顺序下一 PC 使用 pc_increment：整数参数 WORDS（默认 1，语义支持 0..D），输入 pc[31:0]，输出 next_pc[31:0]，组合关系为 `(pc+4*WORDS) mod 2^32`。零增量在本核中直接接线，不保留空层级实例；非零增量的底部两位原样传递，小范围字偏移先计算低位和/进位，较高位使用并行前缀归约。keep_hierarchy/keep 保留有逻辑的小型递增器边界，全部计入原综合的面积和时序。无时钟、无状态、不增加查询或取指流水级。`make test-branch` 增加独立算术对照测试，覆盖 WORDS=0..4、完整低 13 位组合、各级进位边界、32 位回绕及随机地址；tb/pc_increment_equiv.sv 的 Yosys SAT 对照对全部 32 位地址证明同一关系。
+
+Rename 的临时空闲表按译码 lane 提前选择非零目的寄存器，不依赖该 lane 的队列额度；遇到 fit 失败或前端修正后，后续 lane 不发布。实际 free_q/RAT 仍只在有效派遣握手时提交有效前缀，提前准备不会消耗后缀寄存器。used_alu/used_mem/used_lq/used_sq/used_cp 使用 CNT(D) 位，每包计数上界为 D。tb/rename_stream.sv 覆盖宽度 1/2/4 的零额度停顿、恢复单条额度、额度变化时保持已发布包，以及部分派遣后缀的寄存器编号与 RAW。
+
 顶层从 I 路 ALU、MULDIV 和 LSU 的已锁存完成结果产生 I+2 路唤醒和操作数转发，独立于 W 路写回端口。PRF 的 forward_valid/forward_pdst/forward_value 只覆盖组合读值，write_* 仍控制唯一真实写入；p0 始终为零，reset 时不转发。物理目的在活跃指令之间唯一，恢复边界后的年轻结果不会成为存活较老指令的源；恢复边沿取消年轻 FU/候选，之后物理寄存器才可重新分配。
 
 调度器按年龄选择和准备数据，恢复只在执行有效位发布处过滤年轻项。cand_take 可以消费被取消的年轻候选，不能使其在恢复后再次执行。FILTER_AFTER_SELECT=1 时写回仲裁先选择原始有效源，再过滤 done_valid/write_valid；源 ready 和指针不依赖 squash，未选择的年轻结果由所属 FU 在恢复边沿取消。默认 FILTER_AFTER_SELECT=0 保留先过滤再仲裁的行为。
+
+### 18.3 2026-10-02 频率与面积优化测量
+
+保持本节默认配置及原综合流程，基线与本轮均使用 `CLOCK_PERIOD_NS=2.0`、相同 ASAP7 标准单元库、理想时钟和无布线寄生模型。基线为提交 18d8390，测量产物分别位于 `build/freq-area-baseline/synth/opt/` 和 `build/freq-area-control/synth/opt/`；本轮 report.json 的 21 个 RTL 输入 SHA-256 均与本轮源码一致。`make synth` 成功只表示综合与分析流程通过。
+
+| 指标 | 基线 | 本轮 | 变化 |
+| --- | ---: | ---: | ---: |
+| estimated_fmax_mhz | 119.3473 | 147.1687 | +23.31% |
+| minimum_period_ns | 8.3789 | 6.7949 | -18.90% |
+| area_um2（含 SRAM） | 30268.2159 | 24285.6640 | -19.77% |
+| worst_setup_slack_ns（2.0 ns 目标） | -6.3789 | -4.7942 | +1.5847 ns |
+| 六项 IPC 几何平均 | 0.6208 | 0.6117 | -1.47% |
+
+同步 tag SRAM 减少寄存器和宽 tag 选择逻辑；Load 命中延迟和连续吞吐保持，干净 miss 需先经历 PROBE，多一拍 tag 查询。Store 命中在 PROBE 的 SRAM 写边沿完成，并背压下一请求；性能变化以上述完整六项测试为准。Fetch 的窄位宽计数、局部输出使能、预测控制分发和并行 PC 递增，以及 Rename 的空闲表提前准备，改善控制路径。全部改动使用 SystemVerilog 2005，综合约束及库未调整。147.1687 MHz 为综合估计，仍未达到 README-EN 的 300 MHz 门槛。
+
+本轮验证：`make synth`、六项 `make perf`、19 项 `make test MAX_CYCLES=100000000`（19 passed / 0 failed）、`make test-timing`、`make test-branch`、`make test-icache` 全部通过，完整软件回归容器退出码为 0。pc_increment 的 WORDS=0..4 全地址 SAT 等价证明通过。Docker 测试和综合逐项串行执行，编译 JOBS=2，测试容器限内存 4 GiB、综合容器限 5 GiB。软件回归日志为 `build/freq-area-control/software-validation.log`，定向回归日志为 `build/freq-area-control/directed-validation.log`，前后测量及输入哈希对照为 `build/freq-area-control/comparison.json`。SAT 可在同一 Docker 工具环境用 `yosys -p 'read_verilog -sv verilog/pc_increment.sv tb/pc_increment_equiv.sv; prep -top pc_increment_equiv -flatten; sat -verify -prove matched 1 -set-def-inputs'` 复现。

@@ -31,6 +31,8 @@ module fetch #(
     localparam integer QCW = $clog2(FETCH_QUEUE_DEPTH + 1);
     localparam integer OCW = $clog2(IFETCH_OUTSTANDING + 1);
     localparam integer LINE_WORDS = ICACHE_LINE_BYTES/4;
+    localparam integer LINE_W = $clog2(LINE_WORDS);
+    localparam integer CREDIT_W = $clog2(IFETCH_OUTSTANDING + DISPATCH_WIDTH + 1);
     logic [1:0] state [0:FETCH_QUEUE_DEPTH-1]; // free, offer, waiting, ready
     logic [31:0] slot_pc [0:FETCH_QUEUE_DEPTH-1];
     logic [31:0] slot_npc [0:FETCH_QUEUE_DEPTH-1];
@@ -54,10 +56,30 @@ module fetch #(
     logic stop_ready;
     logic stop_create;
     logic [31:0] create_next_pc;
-    integer create_count, credits_used, slot_index;
+    logic [DCW-1:0] create_count;
+    logic [CREDIT_W-1:0] credits_used;
+    integer slot_index;
     wire [FETCH_BITS-1:0] read_packet [0:DISPATCH_WIDTH-1];
     wire [1:0] read_state [0:DISPATCH_WIDTH-1];
     wire read_taken [0:DISPATCH_WIDTH-1];
+    wire [31:0] lane_pc [0:DISPATCH_WIDTH-1];
+    wire [31:0] lane_next_pc [0:DISPATCH_WIDTH-1];
+    localparam integer PREDICTION_BRANCHES = 2*FETCH_QUEUE_DEPTH+1;
+    wire [DISPATCH_WIDTH*PREDICTION_BRANCHES-1:0] prediction_taken;
+    for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_pc_increment
+        // Keep the prediction decision local to each sixteen-bit NPC group.
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PREDICTION_BRANCHES))
+            distribute_prediction(next_pc[31:28] == 0 && pred_taken[lane],
+                prediction_taken[lane*PREDICTION_BRANCHES +: PREDICTION_BRANCHES]);
+        if (lane == 0) begin : g_base_pc
+            assign lane_pc[lane] = next_pc;
+        end else begin : g_offset_pc
+            (* keep_hierarchy, keep *) pc_increment #(.WORDS(lane)) increment_pc (
+                .pc(next_pc), .next_pc(lane_pc[lane]));
+        end
+        (* keep_hierarchy, keep *) pc_increment #(.WORDS(lane+1)) increment_next (
+            .pc(next_pc), .next_pc(lane_next_pc[lane]));
+    end
     for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_queue_read
         logic [FETCH_BITS-1:0] packet;
         logic [1:0] status;
@@ -84,6 +106,10 @@ module fetch #(
     wire req_fire = ic_req_valid && ic_req_ready;
     wire out_fire = fetch_valid && fetch_ready;
     wire load_output = (!out_valid || out_fire) && ready_count != 0;
+    localparam integer OUTPUT_GROUPS = (DISPATCH_WIDTH*FETCH_BITS+15)/16;
+    wire [OUTPUT_GROUPS-1:0] output_enable;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(OUTPUT_GROUPS))
+        distribute_output_enable(load_output, output_enable);
 
     assign ic_req_valid = offer_valid && !fetch_redirect_valid;
     assign ic_req_payload = {fetch_gen, offer_id, offer_count, offer_pc};
@@ -93,19 +119,23 @@ module fetch #(
     assign lookup_pc = next_pc;
 
     always_comb begin
-        credits_used = int'(outstanding_q) + (req_fire ? int'(offer_count) : 0)
-            - (rsp_current ? int'(rsp_count) : 0);
+        credits_used = CREDIT_W'(outstanding_q) +
+            (req_fire ? CREDIT_W'(offer_count) : CREDIT_W'(0)) -
+            (rsp_current ? CREDIT_W'(rsp_count) : CREDIT_W'(0));
         create_count = 0;
         stop_create = 0;
         create_next_pc = next_pc;
         if (!offer_valid || req_fire) begin
             for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                if (!stop_create && lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
-                    lane < LINE_WORDS-int'((next_pc >> 2) & (LINE_WORDS-1)) &&
-                    (next_pc[31:28] != 0 || lane < IFETCH_OUTSTANDING-credits_used)) begin
-                    create_count = create_count + 1;
-                    create_next_pc = next_pc + 32'((lane+1)*4);
-                    if (next_pc[31:28] == 0 && pred_taken[lane]) begin
+                if (!stop_create && count_q < QCW'(FETCH_QUEUE_DEPTH-lane) &&
+                    (lane < LINE_WORDS &&
+                     next_pc[2 +: LINE_W] <= LINE_W'(LINE_WORDS-1-lane)) &&
+                    (next_pc[31:28] != 0 ||
+                     (lane < IFETCH_OUTSTANDING &&
+                      credits_used < CREDIT_W'(IFETCH_OUTSTANDING-lane)))) begin
+                    create_count = create_count + 1'b1;
+                    create_next_pc = lane_next_pc[lane];
+                    if (prediction_taken[lane*PREDICTION_BRANCHES]) begin
                         create_next_pc = pred_npc[lane*32 +: 32];
                         stop_create = 1;
                     end
@@ -117,12 +147,12 @@ module fetch #(
         stop_ready = 0;
         slot_index = 0;
         for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
+            // Count/valid describe the prefix; unused lanes need no masking.
+            ready_packet[lane*FETCH_BITS +: FETCH_BITS] = read_packet[lane];
             slot_index = (int'(head_q) + lane) % FETCH_QUEUE_DEPTH;
             if (lane >= int'(count_q) || read_state[lane] != 2'd3)
                 stop_ready = 1;
             if (!stop_ready) begin
-                ready_packet[lane*FETCH_BITS +: FETCH_BITS] =
-                    read_packet[lane];
                 ready_count = ready_count + 1'b1;
                 if (read_taken[lane]) stop_ready = 1;
             end
@@ -160,7 +190,6 @@ module fetch #(
                 out_valid <= ready_count != 0;
                 if (ready_count != 0) begin
                     out_count <= ready_count;
-                    out_packet <= ready_packet;
                 end
             end
             if (create_count != 0) begin
@@ -174,10 +203,16 @@ module fetch #(
                 next_pc <= create_next_pc;
             end
             if (load_output)
-                count_q <= QCW'(int'(count_q) + create_count - int'(ready_count));
+                count_q <= count_q + QCW'(create_count) - QCW'(ready_count);
             else
-                count_q <= QCW'(int'(count_q) + create_count);
+                count_q <= count_q + QCW'(create_count);
         end
+    end
+    // A local enable drives at most sixteen payload bits. Valid/count retain
+    // the same acceptance edge and blocked packets keep their original data.
+    for (genvar bit_no = 0; bit_no < DISPATCH_WIDTH*FETCH_BITS; bit_no = bit_no+1) begin : g_output_bit
+        always_ff @(posedge clock)
+            if (output_enable[bit_no/16]) out_packet[bit_no] <= ready_packet[bit_no];
     end
     // Static destinations share one write decode per slot instead of a
     // separate binary address mux for each stored bit.
@@ -192,12 +227,14 @@ module fetch #(
                     slot == (int'(rsp_id)+lane) % FETCH_QUEUE_DEPTH &&
                     state[slot] == 2 && slot_gen[slot] == rsp_gen)
                     slot_inst[slot] <= ic_rsp_payload[lane*32 +: 32];
-                if (lane < FETCH_QUEUE_DEPTH-int'(count_q) &&
+                if (count_q < QCW'(FETCH_QUEUE_DEPTH-lane) &&
                     slot == (int'(tail_q)+lane) % FETCH_QUEUE_DEPTH) begin
-                    slot_pc[slot] <= next_pc + 32'(lane*4);
-                    slot_npc[slot] <= (next_pc[31:28] == 0 && pred_taken[lane]) ?
-                        pred_npc[lane*32 +: 32] : next_pc + 32'((lane+1)*4);
-                    slot_taken[slot] <= next_pc[31:28] == 0 && pred_taken[lane];
+                    slot_pc[slot] <= lane_pc[lane];
+                    for (int bit_no = 0; bit_no < 32; bit_no = bit_no+1)
+                        slot_npc[slot][bit_no] <=
+                            prediction_taken[lane*PREDICTION_BRANCHES+1+2*slot+bit_no/16] ?
+                            pred_npc[lane*32+bit_no] : lane_next_pc[lane][bit_no];
+                    slot_taken[slot] <= prediction_taken[lane*PREDICTION_BRANCHES+1+2*slot];
                     slot_gen[slot] <= fetch_gen;
                     if (next_pc[31:28] != 0) slot_inst[slot] <= 0;
                 end
