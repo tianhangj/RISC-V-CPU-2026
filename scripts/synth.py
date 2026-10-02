@@ -106,7 +106,7 @@ def main():
         "check -assert",
         "select -assert-none a:init t:$dlatch* t:$_DLATCH*",
         "dfflibmap -liberty " + quote(seq),
-        "abc " + ("-exe " + quote(abc) + " " if abc else "") + library_args + f" -D {args.clock_period * 1000:.9g}" + " -constr \"abc.constr\"",
+        "abc " + ("-exe " + quote(abc) + " " if abc else "") + library_args + f" -D {args.clock_period * 1000:.9g}",
         "clean",
         "delete t:$scopeinfo",
         "clean -purge",
