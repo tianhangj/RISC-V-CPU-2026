@@ -12,6 +12,7 @@ module lsu_generation;
     logic ld_rsp_valid = 0;
     logic [48:0] ld_rsp_payload = 0;
     logic result_ready = 0;
+    logic ld_req_ready = 0;
     wire ld_req_valid, result_valid;
     wire [48:0] ld_req_payload;
     wire [40:0] result_payload;
@@ -22,7 +23,7 @@ module lsu_generation;
         .exec_valid, .exec_ready(), .exec_payload,
         .result_valid, .result_ready, .result_payload,
         .st_start_valid(1'b0), .st_start_id(1'b0), .st_done_valid(),
-        .ld_req_valid, .ld_req_ready(1'b1), .ld_req_payload,
+        .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload,
         .st_req_valid(), .st_req_ready(1'b1), .st_req_payload(), .st_rsp_valid(1'b0)
     );
@@ -46,9 +47,12 @@ module lsu_generation;
         allocate_load(6'd32);
         wait (ld_req_valid);
         if (ld_req_payload[48:33] !== 16'd0) $fatal(1, "old request generation");
-        @(posedge clock);
         @(negedge clock);
         squash_valid = 1;
+        ld_req_ready = 1;
+        #1;
+        if (!ld_req_valid || ld_req_payload[48:33] !== 16'd0)
+            $fatal(1, "squash-edge RAM offer was not preserved through acceptance");
         @(posedge clock);
         @(negedge clock);
         squash_valid = 0;

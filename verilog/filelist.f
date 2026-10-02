@@ -3,6 +3,7 @@
 # Example entries:
 # student_top.sv
 # core.sv
+signal_fanout.sv
 decode.sv
 alu.sv
 mul_div.sv
@@ -13,6 +14,7 @@ branch_ctrl.sv
 branch_predictor.sv
 fetch.sv
 icache.sv
+dcache.sv
 axi_bridge.sv
 iq_alu.sv
 iq_mem.sv

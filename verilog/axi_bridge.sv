@@ -2,6 +2,7 @@ module axi_bridge #(
     parameter integer LQ_DEPTH = 8,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer AXI_RD_OUTSTANDING = 16,
+    parameter integer AXI_WR_OUTSTANDING = 16,
     parameter integer GEN_WIDTH = 16,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
@@ -61,8 +62,13 @@ module axi_bridge #(
     wire ar_fire = arvalid && arready;
     wire r_fire = rvalid && rready;
     wire st_accept = st_req_valid && st_req_ready;
-    logic write_busy, aw_pending, w_pending;
-    logic [WRITE_REQ_BITS-1:0] write_q;
+    localparam integer WQW = (AXI_WR_OUTSTANDING > 1) ? $clog2(AXI_WR_OUTSTANDING) : 1;
+    localparam integer WCW = $clog2(AXI_WR_OUTSTANDING + 1);
+    logic [WRITE_REQ_BITS-1:0] write_q [0:AXI_WR_OUTSTANDING-1];
+    logic [WQW-1:0] write_tail, aw_head, w_head;
+    logic [WCW-1:0] write_count, aw_count, w_count;
+    wire aw_fire = awvalid && awready;
+    wire w_fire = wvalid && wready;
 
     always_comb begin
         if_req_ready = 0;
@@ -84,13 +90,14 @@ module axi_bridge #(
     assign ld_rsp_valid = r_fire && is_load[response_q];
     assign if_rsp_payload = {generation[response_q], identifier[response_q][IF_ID_WIDTH-1:0], rdata};
     assign ld_rsp_payload = {generation[response_q], identifier[response_q][LIDW-1:0], rdata};
-    assign st_req_ready = !write_busy;
-    assign awaddr = write_q[WRITE_REQ_BITS-1 -: 32];
-    assign wdata = write_q[35:4];
-    assign wstrb = write_q[3:0];
-    assign awvalid = write_busy && aw_pending;
-    assign wvalid = write_busy && w_pending;
-    assign bready = write_busy && !aw_pending && !w_pending;
+    assign st_req_ready = write_count < AXI_WR_OUTSTANDING;
+    assign awaddr = write_q[aw_head][WRITE_REQ_BITS-1 -: 32];
+    assign wdata = write_q[w_head][35:4];
+    assign wstrb = write_q[w_head][3:0];
+    assign awvalid = aw_count != 0;
+    assign wvalid = w_count != 0;
+    // A response is eligible only after both halves of its request have left.
+    assign bready = write_count > aw_count && write_count > w_count;
     assign st_rsp_valid = bvalid && bready;
 
     always_ff @(posedge clock) begin
@@ -101,9 +108,12 @@ module axi_bridge #(
             unsent_q <= 0;
             sent_q <= 0;
             prefer_load <= 0;
-            write_busy <= 0;
-            aw_pending <= 0;
-            w_pending <= 0;
+            write_tail <= 0;
+            aw_head <= 0;
+            w_head <= 0;
+            write_count <= 0;
+            aw_count <= 0;
+            w_count <= 0;
         end else begin
             if (read_accept) begin
                 is_load[enqueue_q] <= accept_load;
@@ -124,14 +134,17 @@ module axi_bridge #(
             unsent_q <= unsent_q + read_accept - ar_fire;
             sent_q <= sent_q + ar_fire - r_fire;
             if (st_accept) begin
-                write_q <= st_req_payload;
-                write_busy <= 1;
-                aw_pending <= 1;
-                w_pending <= 1;
+                write_tail <= (write_tail == AXI_WR_OUTSTANDING-1) ? 0 : write_tail + 1'b1;
             end
-            if (awvalid && awready) aw_pending <= 0;
-            if (wvalid && wready) w_pending <= 0;
-            if (st_rsp_valid) write_busy <= 0;
+            if (aw_fire) aw_head <= (aw_head == AXI_WR_OUTSTANDING-1) ? 0 : aw_head + 1'b1;
+            if (w_fire) w_head <= (w_head == AXI_WR_OUTSTANDING-1) ? 0 : w_head + 1'b1;
+            write_count <= write_count + st_accept - st_rsp_valid;
+            aw_count <= aw_count + st_accept - aw_fire;
+            w_count <= w_count + st_accept - w_fire;
         end
+    end
+    for (genvar slot = 0; slot < AXI_WR_OUTSTANDING; slot = slot+1) begin : g_write_queue
+        always_ff @(posedge clock)
+            if (st_accept && write_tail == WQW'(slot)) write_q[slot] <= st_req_payload;
     end
 endmodule

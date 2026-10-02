@@ -1,10 +1,10 @@
 # RV32IM 指令缓存乱序核接口规范
 
-版本：v1.7.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.8.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
-- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction Cache；带 BTB + 2-bit BHT；无 Data Cache、Store 转发或投机访存消歧；使用分支 checkpoint 和 16-bit generation。
+- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction/Data Cache；带 BTB + 2-bit BHT；无 Store 转发或投机访存消歧；使用分支 checkpoint 和 16-bit generation。
 - 默认启用全控制流预测；BTB 未命中时预测 PC+4，命中后条件分支使用 BHT 方向，JAL/JALR 使用 BTB 目标。一个取指包内按 PC+4 连续递增，并在首个预测 taken 处截断。分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
 - 正确路径指令受支持且访问合法；所有路径地址按访问宽度自然对齐。正确路径取指、Load 访问 RAM，Store 访问 RAM 或执行合法退出写。运行期间指令内存保持不变，不支持自修改代码或 Store 引起的 ICache 失效。无 CSR、特权陷入或精确异常状态。
 - Store 仅在 ROB 头部获得外部写授权。RAM Load 可越过地址已知且字节范围不重叠的旧 Store；非 RAM Load 在本地返回零。
@@ -28,18 +28,20 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | 参数 | 默认 | 取值 |
 |---|---:|---|
 | ISSUE_WIDTH（I） | 2 | 1/2/4，全核每拍发射上限 |
-| DISPATCH_WIDTH（D） | 2 | 1/2/4 |
+| DISPATCH_WIDTH（D） | 4 | 1/2/4 |
 | WB_WIDTH（W） | 2 | 1/2/4，每拍接受完成数 |
 | COMMIT_WIDTH（C） | 2 | 1/2/4 |
-| ROB_DEPTH（R） | 16 | 2 的幂，至少 8，且不小于 I/D/W/C |
-| PRF_SIZE（P） | 48 | 至少 32+D |
+| ROB_DEPTH（R） | 32 | 2 的幂，至少 8，且不小于 I/D/W/C |
+| PRF_SIZE（P） | 64 | 至少 32+D |
 | IQ_ALU_DEPTH / IQ_MEM_DEPTH | 8 / 8 | 2 的幂，至少 D |
-| LQ_DEPTH / SQ_DEPTH | 4 / 4 | 2 的幂，至少 D |
-| FETCH_QUEUE_DEPTH（F） | 8 | 2 的幂，至少 D |
-| IFETCH_OUTSTANDING | 4 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
+| LQ_DEPTH / SQ_DEPTH | 8 / 8 | 2 的幂，至少 D |
+| FETCH_QUEUE_DEPTH（F） | 16 | 2 的幂，至少 D |
+| IFETCH_OUTSTANDING | 8 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
 | ICACHE_SIZE_BYTES | 1024 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
 | ICACHE_WAYS | 2 | 1/2/4 |
 | ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
+| DCACHE_SIZE_BYTES | 16384 | 2 的幂，至少 DCACHE_LINE_BYTES |
+| DCACHE_LINE_BYTES | 32 | 16/32/64 字节；直接映射、write-back/write-allocate |
 | BP_ENABLE | 1 | 0/1；关闭时顺序预测且停止训练 |
 | BTB_ENTRIES | 64 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
 | BHT_ENTRIES | 256 | 2 的幂，至少 2，独立 PC 字地址索引 |
@@ -49,7 +51,7 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | GEN_WIDTH | 16 | generation 位宽；在任何旧读事务存活期间不回绕碰撞 |
 | RESET_PC | 32'h00000000 | RAM 内，4 字节对齐 |
 
-XLEN 固定 32，不作为参数。最多一笔未完成写。参数满足上表是集成前提，不增加参数合法性检查。
+XLEN 固定 32，不作为参数。LSU 最多一个已授权 Store；AXI 桥允许多笔按序写回在途。参数满足上表是集成前提，不增加参数合法性检查。
 
 Cache 组数 `S=ICACHE_SIZE_BYTES/(ICACHE_WAYS*ICACHE_LINE_BYTES)` 为 2 的幂，允许 S=1；行字数 `L=ICACHE_LINE_BYTES/4`。`IF_ID_WIDTH=IDX(L)` 用于填充字编号，`DCW=CNT(D)` 用于包 count。
 
@@ -142,32 +144,32 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 
 ### 3.3 位宽
 
-下表位数对应第 2 节的顶层默认参数（D=I=W=C=2、R=16、P=48、LQ=SQ=4、F=8、K=4）。各模块独立例化时按其实际参数重算。
+下表位数对应第 2 节的顶层默认参数（D=4、I=W=C=2、R=32、P=64、LQ=SQ=8、F=16、K=4）。各模块独立例化时按其实际参数重算。
 
 | 常量 | 公式 | 默认位数 |
 |---|---|---:|
-| `TAG_BITS` | RW | 4 |
+| `TAG_BITS` | RW | 5 |
 | `FETCH_BITS` | 32 + 32 + 32 | 96 |
 | `DECODE_BITS` | 32 + 32 + 6 + 5 + 5 + 5 + 32 | 117 |
-| `ROB_ALLOC_BITS` | PW + 2 + SIDW | 10 |
-| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 94 |
-| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 53 |
-| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 13 |
-| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 146 |
-| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 77 |
-| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 105 |
-| `RESULT_BITS` | TAG_BITS + PW + 32 | 42 |
-| `RESOLVE_BITS` | TAG_BITS + CIDW + 98 | 104 |
+| `ROB_ALLOC_BITS` | PW + 2 + SIDW | 11 |
+| `ALU_IQ_BITS` | TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32 | 95 |
+| `MEM_IQ_BITS` | TAG_BITS + 3 + MIDW + PW + PW + 32 | 55 |
+| `MEM_ALLOC_BITS` | 1 + MIDW + TAG_BITS + PW | 15 |
+| `ALU_EXEC_BITS` | TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32 | 147 |
+| `MUL_EXEC_BITS` | TAG_BITS + 3 + PW + 32 + 32 | 78 |
+| `MEM_EXEC_BITS` | TAG_BITS + 3 + MIDW + 32 + 32 + 32 | 107 |
+| `RESULT_BITS` | TAG_BITS + PW + 32 | 43 |
+| `RESOLVE_BITS` | TAG_BITS + CIDW + 98 | 105 |
 | `BP_TRAIN_BITS` | 32 + 1 + 1 + 32 | 66 |
-| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 38 |
+| `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
 | `REG_COMMIT_BITS` | PW | 6 |
-| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 53 |
-| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 85 |
+| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 55 |
+| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 151 |
 | `IF_REQ_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
 | `IF_RSP_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
-| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
-| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
+| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
+| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
 | `WRITE_REQ_BITS` | 32 + 32 + 4 | 68 |
 
 ## 4. 外部接口
@@ -211,7 +213,7 @@ fetch_redirect 当拍取消未接受 offer 和旧输出，边沿清旧槽及当�
 
 ### 5.2 Instruction Cache
 
-Cache 默认 4 KiB、2 路、32 B 行、64 组。完整 32 位地址拆成 tag、组号、行内字号。每路一个同步 1RW sram_fakeram，DEPTH=S、WIDTH=ICACHE_LINE_BYTES×8，整行写入；tag、valid 与每组替换指针用寄存器。复位只清 valid、替换指针及控制状态，不清 tag、SRAM 或无效载荷。
+ICache 当前顶层默认 1 KiB、2 路、32 B 行、16 组。完整 32 位地址拆成 tag、组号、行内字号。每路一个同步 1RW sram_fakeram，DEPTH=S、WIDTH=ICACHE_LINE_BYTES×8，整行写入；tag、valid 与每组替换指针用寄存器。复位只清 valid、替换指针及控制状态，不清 tag、SRAM 或无效载荷。
 
 命中请求在接受边沿启动 SRAM 读，下一周期产生包响应；无写入冲突时可每拍接收一个包。替换先选最低编号无效路，否则选轮转指针；分配填充时立即使目标路无效，安装成功后将指针推进到该路的下一路。
 
@@ -265,7 +267,7 @@ Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选�
 | cp_alloc_valid[D]、cp_alloc_payload[D] | branch_ctrl | 控制流 lane 的 cp_alloc_t 分配事件；Rename 同拍保存快照 |
 | front_redirect_valid/front_redirect_pc | branch_ctrl | 非控制流错误预测的前端纠正事件，仅给出真实下一 PC |
 
-顶层根据 disp_rob.kind 统计 need_alu/need_mem/need_lq/need_sq；统一 fire 为 `disp_valid && disp_ready`，disp_ready 由 !squash_valid 及四类队列和 ROB 的容量满足条件产生。Checkpoint 候选已在形成 offer 时锁定；除了这个 offer 没有其他新资源申请者，分支恢复只消费既有预留编号并取消旧 offer，故背压期间候选不会被抢走。ROB 接收 disp_fire、disp_count 和 disp_rob；IQ 接收按类别与 fire 生成的逐 lane disp_valid；LSU 接收同样的访存 lane 事件。无效 lane 载荷不消费，不为 LSU 或 IQ 传递全核 count 和其他模块的投影。
+顶层根据 disp_rob.kind 统计 need_alu/need_mem/need_lq/need_sq；统一 fire 为 `disp_valid && disp_ready`，disp_ready 由 !squash_valid 及四类队列和 ROB 的容量满足条件产生。Checkpoint 候选已在形成 offer 时锁定；除了这个 offer 没有其他新资源申请者，分支恢复只消费既有预留编号并取消旧 offer，故背压期间候选不会被抢走。ROB 接收 disp_fire、disp_count 和 disp_rob；IQ 接收包内类别生成的 disp_prepare 和叠加 fire 的逐 lane disp_valid；LSU 接收同样的访存 lane 事件。无效 lane 载荷不消费，不为 LSU 或 IQ 传递全核 count 和其他模块的投影。
 
 Rename 按包内顺序读取临时推测 RAT 的源映射；对非零 rd，先把更新前映射记录为该 lane 的 `old_pdst`，再分配最低编号空闲 pdst 并更新临时 RAT；无目的写 lane 的 `old_pdst=0`。后续 lane 读取更新后的映射。ps1/ps2=0 时源总是就绪。只有 fire 才更新推测 RAT、空闲表和分配状态。offer 保留的 checkpoint 编号仍处于空闲状态，对应 snapshot 可提前写入；每个镜像包含该分支及同包更老 lane 的 RAT 更新，在 fire 边沿发布有效位。提前写入不发布 cp_alloc_valid、不改变 snapshot_valid，也不回收或分配物理寄存器。offer 中编号保持，源就绪侧带读取实时 ready 表并合入当拍唤醒；若源来自同包较老 lane 的新目的则未就绪。
 
@@ -293,13 +295,13 @@ cp_release_mask 在解析后回收元数据与对应快照；正确预测立即�
 
 ## 7. IQ、发射与 PRF
 
-IQ 仅接收自己的派遣投影及 `wake_valid[W]/wake_pdst[W]`，不接收结果数据、ROB 完成信息、控制流目标或退休信息。各 IQ 存储本地有效位与源就绪位，每拍给出至多 I 个按 ROB 年龄排序的就绪候选。Rename 的物理 ready 表在派遣时清新目的位，在 wake_valid 时置对应目的位；IQ 在派遣时采样源就绪，随后按源物理编号匹配唤醒。
+IQ 仅接收自己的派遣投影及 `wake_valid[I+2]/wake_pdst[I+2]`（模块端口宽度参数仍名为 WB_WIDTH，顶层单独设为 I+2），不接收结果数据、ROB 完成信息、控制流目标或退休信息。各 IQ 存储本地有效位与源就绪位，每拍给出至多 I 个按 ROB 年龄排序的就绪候选。Rename 的物理 ready 表在派遣时清新目的位，在 wake_valid 时置对应目的位；IQ 在派遣时采样源就绪，随后按源物理编号匹配唤醒。
 
-候选接口为 cand_valid[I]、cand_uop[I]、cand_take[I]。ALU IQ 在候选选择后有 I 个 candidate_reg 队列项，MEM IQ 有一个 candidate_reg 队列项，每项保存一条指令；就绪指令在 IQ entry→candidate_reg 的上升沿正式离开 IQ 并释放原槽，下一拍才对 issue_sched 可见。alu_iq_free 和 mem_iq_free 只统计各自 IQ 内部空槽，不包含 candidate_reg；cand_take 在上升沿消费对应 candidate_reg 项，同拍可从 IQ 补入新项。ALU candidate_reg 输出按 ROB 年龄排序，MEM 每次搬入 ROB 年龄最老的就绪项；同龄时 IQ 槽号较小者先选，每个发射 lane 排除先前 lane 已选的槽。背压时保留未消费项。squash 当拍屏蔽年轻候选并在边沿移除，只允许存活指令补入。同一指令在候选接口只出现一次。选择逻辑支持非 2 的幂的 IQ 深度和正整数发射宽度。
+候选接口为 cand_valid[I]、cand_uop[I]、cand_take[I]。iq_alu/iq_mem 新增 PIPELINED（模块默认 1）。PIPELINED=1 保留候选寄存器队列，IQ 在搬入该级时释放槽；PIPELINED=0 直接输出 core 的按年龄候选，cand_take 在接收边沿释放 IQ 槽。student_top 当前使用 0。背压保留未消费项；squash 由调度器按年龄屏蔽年轻执行有效位发布，take 可消费被取消项；队列在恢复边沿清除年轻项。已有项的当拍 wake 可参与候选选择，未就绪的源仍按物理编号匹配；同龄时按槽号选择，同一条指令不重复发射。
 
-issue_sched 合并两组候选，按 ROB 年龄选择可容纳的最老项，同龄时按 ALU 候选槽号升序、再按 MEM 候选的顺序选择；后续发射 lane 排除先前 lane 已选的候选和已占用的执行入口。每拍总 take 数不超过 I。它保留 I 个 ALU 入口、一个 MULDIV 入口、一个 AGU 入口，各深度 1；周期开始时为空的入口可接收新项。ALU IQ 的 op=38..45 投影到 mul_exec_t，其他项投影到 alu_exec_t；MEM IQ 投影到 mem_exec_t。
+issue_sched 合并两组候选，按 ROB 年龄选择可容纳的最老项，同龄时按 ALU 候选槽号升序、再按 MEM 候选的顺序选择；后续发射 lane 排除先前 lane 已选的候选和已占用的执行入口。每拍总 take 数不超过 I。它保留 I 个 ALU 入口、一个 MULDIV 入口、一个 AGU 入口，各深度 1；为空或本拍被执行单元接收的入口可接收新项。ALU IQ 的 op=38..45 投影到 mul_exec_t，其他项投影到 alu_exec_t；MEM IQ 投影到 mem_exec_t。
 
-PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。每个读口按连续 8 项分 bank：地址低 3 位在各 bank 内译码选择数据，高位译码选择 bank；最后一个 bank 可不足 8 项。PRF 有 W 个写口，write_valid/pdst/value 只驱动对应写入。p0 读零，不写入；读口只读取已存储值，不做同拍写入旁路，写值在接收边沿后可读。两个 IQ 的已有项先在唤醒边沿更新源就绪位，再在下一上升沿搬入 candidate_reg，随后对外可见；候选选择不组合旁路当拍 wake，从而切断 WB→唤醒→年龄选择路径。此时 PRF 写入已完成。派遣与唤醒同拍时仍记录该唤醒，新项最早下一拍才参与候选选择。
+PRF 有 2I 个组合读口，选择序号 k 使用读口 2k/2k+1，操作数与执行投影一起在 take 边沿锁存。读口仍按 8 项分 bank。新增 BYPASS_WRITE（模块默认 0）；student_top 使用 1，当拍 forward_valid/pdst 匹配读地址时返回 forward_value，使已完成但尚未获得写回端口的生产者也能提供同拍唤醒值。FORWARD_WIDTH 默认等于 WB_WIDTH，顶层设为 I+2。多个转发口匹配时最后一个 lane 优先；p0 始终读零且不写。派遣与唤醒同拍仍记录源就绪，新派遣项最早下一拍参与选择。
 
 PRF 复位只需将 p1..p31 的初始架构值设零；p0 可直接用常量实现，其他数据不复位。checkpoint 恢复只处理被 squash 的目的和映射，不清 PRF 数据。
 
@@ -331,11 +333,11 @@ IQ、发射入口、ALU/MULDIV、AGU、LSU 完成缓冲按第 12 节取消年轻
 
 ### 8.2 完成仲裁与消费者
 
-wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result_t，不携带控制流目标。源编号 0..I-1 为 ALU、I 为 MULDIV、I+1 为 LSU。WB 直接接收 squash_valid/tag 和 rob_head，仲裁前按周期开始时的 head 屏蔽本拍 squash 的年轻结果，不向 ROB 发起存活查询。
+wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result_t，不携带控制流目标。源编号 0..I-1 为 ALU、I 为 MULDIV、I+1 为 LSU。WB 直接接收 squash_valid/tag 和 rob_head，按周期开始时的 head 屏蔽本拍 squash 的年轻 done/write，不向 ROB 发起存活查询。FILTER_AFTER_SELECT 默认 0（先过滤再仲裁）；顶层设 1（先仲裁再过滤输出），使源 ready 与恢复无组合依赖。
 
 此筛选依赖第 2 节既有的内部生命周期约定：每条指令只产生一次被接收的完成，接收后源清除该结果；被 squash 的内部工作在该边沿取消，之后不能重现旧结果。LSU 先按 LQ 完整身份过滤外部迟到响应，再产生结果。因此待仲裁结果均属于周期开始时活跃的 ROB 项，只需处理本拍 squash 的年龄边界。
 
-只在 result_valid 且未被本拍 squash 时参加 W 路轮询仲裁，每源每拍至多一个；指针移至最后接收源之后，没有存活接收则保持。被 squash 的有效结果直接 ready 接收并丢弃，不占 WB lane。被取消的 FU 也可直接撤销其年轻结果 valid。
+每源每拍至多占一个 W 路轮询 lane，指针移至最后接收源之后。FILTER_AFTER_SELECT=0 时仅存活结果参与仲裁，年轻结果直接 ready 丢弃。FILTER_AFTER_SELECT=1 时所有原始有效源参与仲裁；被选中的年轻项仍 ready，但 done/write 均为零，未选中的年轻项由 FU 在恢复边沿自行清除。没有选择则指针保持。
 
 轮询指针只需 IDX(I+2) 位，复位为零；索引回绕使用比较与减法，避免把 32 位有符号取模综合进仲裁路径。端口、每 lane 的轮询顺序和指针更新时机不变。
 
@@ -345,7 +347,7 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 | write_valid[W]、write_pdst[W]、write_value[W] | PRF | 存活完成且 pdst!=0 时写入 |
 | write_valid[W]、write_pdst[W] 的分支线 | Rename、两 IQ 的 wake 端口 | 仅物理目的和有效位，不增加结果数据 |
 
-wb_arb 新增整数参数 `PIPELINED`（默认 0，取 0/1）。独立模块默认维持组合广播；student_top 固定使用 PIPELINED=1，仲裁选中的完整 `{tag,pdst,value}` 先锁存一拍，下一拍广播。该级每拍接收 W 个结果，不增加输出 ready；在输出时再次按当前 squash 年龄边界过滤，避免暂存的年轻结果越过恢复。cursor 仍在 FU 结果被接收时前进，ALU 解析事件仍独立于该流水级。完成、PRF 写与唤醒在同一广播接收边沿发生。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生完成或唤醒。
+wb_arb 新增整数参数 `PIPELINED`（默认 0，取 0/1）。独立模块默认维持组合广播；student_top 当前使用 PIPELINED=0，当拍仲裁并广播；选择 PIPELINED=1 时，完整 `{tag,pdst,value}` 先锁存一拍，下一拍广播。该级每拍接收 W 个结果，不增加输出 ready；在输出时再次按当前 squash 年龄边界过滤，避免暂存的年轻结果越过恢复。cursor 仍在 FU 结果被接收时前进，ALU 解析事件仍独立于该流水级。完成和 PRF 写在同一广播接收边沿发生；顶层唤醒独立来自已锁存 FU 结果，可早于写回接收。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生 done 或真实 PRF 写；其原始唤醒只影响随后被取消的年轻依赖状态。
 
 ## 9. ROB 与退休
 
@@ -353,7 +355,7 @@ ROB 每项保存 `rob_alloc_t`（其中含 old_pdst/kind/sq_id）、done 和 Sto
 
 非 Store 指令（含控制流、Load）每拍退休至多 C 条连续已完成前缀；遇到未完成项或 Store 停止，较老前缀先退休。控制流与其他非 Store 指令共用退休宽度，不截断前缀，也不再触发恢复；实际目标的解析事件在其首次结果可见时已处理。Store 仍在头部单独授权、等待写完成后单独退休。当拍完成最早下一拍退休；squash 当拍的退休前缀不得包含边界之后的年轻项。
 
-Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 后 ROB 记已响应，最早下一拍退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
+Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 且头部 Store 已授权时 ROB 可在同一边沿退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
 
 ROB 只向 Rename 发出写寄存器退休 lane 的 reg_commit_valid/old_pdst，允许空洞；`old_pdst!=0` 即表示该项存在架构寄存器写。退休时 Rename 直接释放 old_pdst；LSU 不接退休广播。
 
@@ -378,13 +380,13 @@ load_bits    = read_data >> (8 * offset)
 
 size 为本地译码结果，不是流水接口字段。Load 按大小截取并符号/零扩展。RAM 门控只比较 effective_addr[31:28]==0；自然对齐访问不会跨越对齐字或 RAM 边界，无对齐检查或末字节范围加法器。
 
-RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。LSU 从 branch_ctrl 接收 `current_gen`；形成新的 ld_req offer 时把当时的 `current_gen` 锁存在该 LQ 槽中。ld_req 为保持型通道，携带 `{gen,id}`，桥接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
+恢复边沿允许暂存的 RAM Load 与 DCache 握手；squash 清除年轻槽后，旧响应按原 {gen,id} 过滤并只归还额度。尚未接受的年轻 offer 在恢复边沿取消。RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。LSU 从 branch_ctrl 接收 `current_gen`；形成新的 ld_req offer 时把当时的 `current_gen` 锁存在该 LQ 槽中。ld_req 为保持型通道，携带 `{gen,id}`，桥接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
 
 非 RAM Load 不发请求，在其 LQ 产生零值并标记数据就绪，不占读额度，不等待 Store 消歧或外部响应。这使任意错误路径 Load 不访问 MMIO，也不会等待不存在的结果。
 
-LSU 只有一个 result_t 输出缓冲，仅在周期开始时为空时填入；从数据就绪的 LQ 和地址/数据就绪的 SQ 中选最老且完成未发送的项；载荷从队列记录取 tag/pdst，Store 的 pdst=0。完成被 wb_arb 接收后，Load 立即释放 LQ；Store 标记执行完成已发送并继续保留 SQ。LQ 不必等退休，已返回的读事务不存在迟到响应。
+LSU 只有一个 result_t 输出缓冲，为空或本拍被接收时可填入下一项；从数据就绪的 LQ 和地址/数据就绪的 SQ 中选最老且完成未发送的项；载荷从队列记录取 tag/pdst，Store 的 pdst=0。完成被 wb_arb 接收后，Load 立即释放 LQ；Store 标记执行完成已发送并继续保留 SQ。LQ 不必等退休，已返回的读事务不存在迟到响应。
 
-SQ 接收头部 st_start_id 后建立仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。桥发出 st_rsp_valid 时，LSU 同拍向 ROB 发出 st_done_valid，并在边沿释放对应 SQ。Store 已完成外部写后即可解除所有相关 Load 依赖，不必等待下一拍 ROB 退休；等待 AW/W 接受不能代替等待 B。
+SQ 接收头部 st_start_id 后建立仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。请求由 DCache 接收，RAM 命中在更新 SRAM 后产生 st_rsp_valid，缺失在完成填充与写分配后返回完成。LSU 向 ROB 发 st_done_valid 并释放 SQ，相关 Load 依赖解除。MMIO 地址由 DCache 先排空脏行，再透传 AW/W/B，等待自身 B 才完成。结果/Load offer 缓冲支持接收与补入同拍；已暂存的 Load 不会再次选中。
 
 错误路径 Store 不会取得头部授权，任意地址仅保留在 SQ。正确路径合法退出 SW 也遵守相同授权及 AW/W/B 协议。LSU 不检查授权地址或标签的一致性，不为冗余核对传递副本。
 
@@ -396,21 +398,21 @@ squash 只清除年轻 LQ/SQ、年轻未接受请求和年轻完成缓冲，保�
 
 ### 11.1 读通路
 
-ICache 填充 IF/LD 请求为独立保持型通道，分别使用 IF_ID_WIDTH/LIDW 位 id，并携带请求所属 generation（`{gen,id}`）；外部 AXI 端口不增加 ID。共享最多 AXI_RD_OUTSTANDING 笔请求；两者同时有效时轮询，复位 IF 优先，每次接收后优先另一方，每拍至多接受一个。桥本地记录 source、generation、对应槽号和 AR 所需地址。LD 的 generation 来自原 Load 发出时锁存的值，不强制改成当前 generation。
+ICache 的 IF 与 DCache 的 LD 填充请求为独立保持型通道，分别使用 IF_ID_WIDTH/DC_WORD_W 位 id（桥内 LIDW 设为 DC_WORD_W），并携带请求所属 generation（`{gen,id}`）；外部 AXI 端口不增加 ID。共享最多 AXI_RD_OUTSTANDING 笔请求；两者同时有效时轮询，复位 IF 优先，每次接收后优先另一方，每拍至多接受一个。桥本地记录 source、generation、对应槽号和 AR 所需地址。LD 的 generation 来自原 Load 发出时锁存的值，不强制改成当前 generation。
 
 已接受请求按顺序发送 AR，arvalid/addr 保持至 arready。请求描述符保留到对应 R 握手；AXI 无 ID，R 匹配最老的已发 AR 请求。同拍刚握手的 AR 最早下一拍才接受其 R，符合外部从机延迟约定。
 
-ICache 填充缓冲和 LSU 为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_rsp_ready，也不需要桥内返回数据队列。存在已发 AR 的队首事务时桥接收 R，在握手拍向对应客户端发送一次 `{gen,id,data}` 事件并释放桥槽。无论身份是否已被 squash 都返回事件，由客户端按 `{gen,id}` 匹配：ICache 按物理填充身份写整行缓冲，LSU 匹配则写槽，否则丢弃数据并归还 Load 额度。桥不按当前 generation 过滤，也不因前端恢复而阻塞 R。
+ICache/DCache 填充缓冲为每个读预留了接收槽，因此不提供 if_rsp_ready/ld_rsp_ready，也不需要桥内返回数据队列。存在已发 AR 的队首事务时桥接收 R，在握手拍向对应客户端发送一次 `{gen,id,data}` 事件并释放桥槽。无论身份是否已被 squash 都返回事件，由客户端按 `{gen,id}` 匹配：ICache 按物理填充身份写整行缓冲，DCache 按填充字号写 SRAM；DCache 返回给 LSU 的 {gen,id} 仍按 LQ 身份匹配。桥不按当前 generation 过滤，也不因前端恢复而阻塞 R。
 
 ### 11.2 写通路
 
-桥只有一个写槽，st_req 为 addr/data/strb 保持型通道，不携带事务 ID。接受后分别维护 aw_pending、w_pending；AW 与 W 独立驱动并各自保持至握手。两者完成后接收 B，`st_rsp_valid=bvalid&&bready` 为无载荷完成事件，LSU 无需 ready；桥在该边沿释放写槽。不保存 bresp 或额外写响应缓冲。
+桥有 AXI_WR_OUTSTANDING 个写槽（模块默认 16），st_req 为 addr/data/strb 保持型通道，不携带事务 ID。AW、W 各有顺序发送指针和未发送计数，独立驱动并保持至握手；write_count 包含等待发送或等待 B 的事务。仅当最老事务的 AW、W 都已握手时接收 B，`st_rsp_valid=bvalid&&bready` 为无载荷完成事件，并释放一个槽。队列满时背压；支持 AW/W 速度不同、连续请求及同拍入队/出队，保持 AXI4-Lite 无 ID 的顺序响应约定。CPU 集成时其写客户端为 DCache。
 
 ### 11.3 跨 generation 的事务履约
 
 桥不接收 run/kill/restore/squash，也不提供恢复用 idle。即使请求所属路径已经失效，已接受请求仍按原顺序完成 AR/R 或 AW/W/B；已展示的 VALID 保持到握手。新路径可使用剩余容量，不需要等整个桥排空；总线队列满仍会产生正常背压。
 
-写请求不增加 generation 字段：它只来自不可 squash 的已授权 Store，其 ROB 项会一直保留到写完成后退休。
+写请求不增加 generation 字段：它来自 DCache 的已提交脏数据写回或已授权 MMIO Store，均不可 squash。RAM Store 的 ROB 项在 Cache 更新完成后退休；MMIO 等待所有脏写回和自身 B 完成。
 
 ## 12. 执行期恢复与 generation
 
@@ -473,21 +475,23 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 ```systemverilog
 module student_top #(
     parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 4,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
 
-    parameter integer ROB_DEPTH = 16,
-    parameter integer PRF_SIZE = 48,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
     parameter integer IQ_ALU_DEPTH = 8,
     parameter integer IQ_MEM_DEPTH = 8,
-    parameter integer LQ_DEPTH = 4,
-    parameter integer SQ_DEPTH = 4,
-    parameter integer FETCH_QUEUE_DEPTH = 8,
-    parameter integer IFETCH_OUTSTANDING = 4,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer IFETCH_OUTSTANDING = 8,
     parameter integer ICACHE_SIZE_BYTES = 1024,
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
+    parameter integer DCACHE_SIZE_BYTES = 16384,
+    parameter integer DCACHE_LINE_BYTES = 32,
     parameter integer BP_ENABLE = 1,
     parameter integer BTB_ENTRIES = 64,
     parameter integer BHT_ENTRIES = 256,
@@ -656,18 +660,22 @@ endmodule
 
 ```systemverilog
 module prf #(
+    parameter integer BYPASS_WRITE = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
+    parameter integer FORWARD_WIDTH = WB_WIDTH,
     parameter integer PRF_SIZE = 64,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1
 ) (
-    input logic clock,
-    input logic reset,
+    input logic clock, reset,
     input logic [2*ISSUE_WIDTH*PW-1:0] rd_addr,
     output logic [2*ISSUE_WIDTH*32-1:0] rd_data,
     input logic [WB_WIDTH-1:0] write_valid,
     input logic [WB_WIDTH*PW-1:0] write_pdst,
-    input logic [WB_WIDTH*32-1:0] write_value
+    input logic [WB_WIDTH*32-1:0] write_value,
+    input logic [FORWARD_WIDTH-1:0] forward_valid,
+    input logic [FORWARD_WIDTH*PW-1:0] forward_pdst,
+    input logic [FORWARD_WIDTH*32-1:0] forward_value
 );
 endmodule
 ```
@@ -756,38 +764,32 @@ endmodule
 
 ### 13.8 `iq_alu`
 
-`cand_valid/cand_uop` 来自每 lane 一个 candidate_reg 队列项；从 IQ 搬入时释放 IQ 槽，`cand_take` 消费寄存项，并允许同拍补位。端口和 `alu_iq_t` 布局不变。
+PIPELINED=1 时 cand_valid/cand_uop 来自每 lane 一个 candidate_reg；当前顶层 PIPELINED=0，组合选择已就绪项，cand_take 当拍释放原 IQ 槽。
 
 ```systemverilog
 module iq_alu #(
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 64,
-    parameter integer IQ_ALU_DEPTH = 16,
+    parameter integer PIPELINED = 1,
+    parameter integer ISSUE_WIDTH = 2, DISPATCH_WIDTH = 2, WB_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_ALU_DEPTH = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer AIQ_CW = $clog2(IQ_ALU_DEPTH + 1),
     parameter integer TAG_BITS = RW,
-    parameter integer ALU_IQ_BITS = TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32
+    parameter integer ALU_IQ_BITS = TAG_BITS + CIDW + 6 + PW + PW + PW + 64
 ) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic clock, reset, squash_valid,
+    input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
-    input logic [DISPATCH_WIDTH-1:0] disp_valid,
-    input logic [DISPATCH_WIDTH*ALU_IQ_BITS-1:0] disp_uop, // alu_iq_t × D
-    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
-    input logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    input logic [DISPATCH_WIDTH-1:0] disp_valid, disp_prepare,
+    input logic [DISPATCH_WIDTH*ALU_IQ_BITS-1:0] disp_uop,
+    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [AIQ_CW-1:0] alu_iq_free,
     output logic [ISSUE_WIDTH-1:0] cand_valid,
-    output logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] cand_uop, // alu_iq_t
+    output logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] cand_uop,
     input logic [ISSUE_WIDTH-1:0] cand_take
 );
 endmodule
@@ -797,13 +799,10 @@ endmodule
 
 ```systemverilog
 module iq_mem #(
-    parameter integer DISPATCH_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 64,
-    parameter integer IQ_MEM_DEPTH = 16,
-    parameter integer LQ_DEPTH = 8,
-    parameter integer SQ_DEPTH = 8,
+    parameter integer PIPELINED = 1,
+    parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
+    parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
+    parameter integer LQ_DEPTH = 8, SQ_DEPTH = 8,
     parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
@@ -813,26 +812,23 @@ module iq_mem #(
     parameter integer TAG_BITS = RW,
     parameter integer MEM_IQ_BITS = TAG_BITS + 3 + MIDW + PW + PW + 32
 ) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic clock, reset, squash_valid,
+    input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
-    input logic [DISPATCH_WIDTH-1:0] disp_valid,
-    input logic [DISPATCH_WIDTH*MEM_IQ_BITS-1:0] disp_uop, // mem_iq_t × D
-    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
-    input logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    input logic [DISPATCH_WIDTH-1:0] disp_valid, disp_prepare,
+    input logic [DISPATCH_WIDTH*MEM_IQ_BITS-1:0] disp_uop,
+    input logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [MIQ_CW-1:0] mem_iq_free,
     output logic cand_valid,
-    output logic [MEM_IQ_BITS-1:0] cand_uop, // mem_iq_t
+    output logic [MEM_IQ_BITS-1:0] cand_uop,
     input logic cand_take
 );
 endmodule
 ```
 
-`iq_mem` 保留 16 项 memory uop 存储及每项的 valid、源操作数就绪状态；每拍按 ROB 年龄将一条最老的已就绪指令搬入单项 candidate_reg，下一拍输出给 `issue_sched`。搬入时释放 IQ 槽，背压时保持寄存项，`cand_take` 消费时可同拍补位；squash 当拍屏蔽年轻寄存项并只补入存活指令。端口和 `mem_iq_t` 布局不变。
+`iq_mem` 的容量由 IQ_MEM_DEPTH 决定，当前顶层为 8 项。PIPELINED=1 时先搬入单项 candidate_reg；当前顶层 PIPELINED=0，组合选择最老已就绪项，cand_take 当拍释放原 IQ 槽。disp_prepare 表示包中属于此队列的 lane，与 dispatch ready 无关；disp_valid 是实际分配事件，必须为 disp_prepare 的子集。空闲槽按排名匹配，载荷可在握手前准备；valid、源就绪状态仍只在实际派遣时发布。ALU IQ 使用相同准备协议。
 
 ### 13.10 `issue_sched`
 
@@ -947,6 +943,7 @@ endmodule
 ```systemverilog
 module wb_arb #(
     parameter integer PIPELINED = 0,
+    parameter integer FILTER_AFTER_SELECT = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -957,22 +954,21 @@ module wb_arb #(
     parameter integer TAG_BITS = RW,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32
 ) (
-    input logic clock,
-    input logic reset,
+    input logic clock, reset,
     input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
     input logic [ISSUE_WIDTH-1:0] alu_result_valid,
     output logic [ISSUE_WIDTH-1:0] alu_result_ready,
-    input logic [ISSUE_WIDTH*RESULT_BITS-1:0] alu_result_payload, // result_t
+    input logic [ISSUE_WIDTH*RESULT_BITS-1:0] alu_result_payload,
     input logic mul_result_valid,
     output logic mul_result_ready,
-    input logic [RESULT_BITS-1:0] mul_result_payload, // result_t
+    input logic [RESULT_BITS-1:0] mul_result_payload,
     input logic lsu_result_valid,
     output logic lsu_result_ready,
-    input logic [RESULT_BITS-1:0] lsu_result_payload, // result_t
+    input logic [RESULT_BITS-1:0] lsu_result_payload,
     output logic [WB_WIDTH-1:0] done_valid,
-    output logic [WB_WIDTH*TAG_BITS-1:0] done_tag, // rob_tag_t × W
+    output logic [WB_WIDTH*TAG_BITS-1:0] done_tag,
     output logic [WB_WIDTH-1:0] write_valid,
     output logic [WB_WIDTH*PW-1:0] write_pdst,
     output logic [WB_WIDTH*32-1:0] write_value
@@ -1047,6 +1043,7 @@ module axi_bridge #(
     parameter integer LQ_DEPTH = 8,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer AXI_RD_OUTSTANDING = 16,
+    parameter integer AXI_WR_OUTSTANDING = 16,
     parameter integer GEN_WIDTH = 16,
     parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
     parameter integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1,
@@ -1157,10 +1154,10 @@ endmodule
 - branch_ctrl 的 checkpoint 候选接 Rename；Rename 的 cp_alloc_* 和 front_redirect_valid/front_redirect_pc 返回控制器。cp_release_mask/restore_cp_id 只接 Rename；ROB、IQ、issue_sched、FU、LSU 和 wb_arb 接 squash_valid/tag，Rename 只接 squash_valid。
 - rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl、wb_arb，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
 - issue_sched 的 ALU/MUL/MEM 执行投影分别接对应入口；每个入口保留完整身份用于局部取消。PRF 读口及窄 wake_* 连接保持。
-- 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb，由 WB 按 squash 年龄边界筛选后仲裁。
-- wb_arb.done_tag/valid 只接 ROB；write_* 接 PRF，write_valid/pdst 另接 Rename 和两 IQ 的 wake_*。控制流 npc 不进入该广播。
-- ROB.reg_commit_* 只接 Rename（仅携带 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
-- Fetch→ICache 使用带 count 的包请求/响应；ICache→桥的 IF 与 LSU→桥的 LD 请求和响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
+- 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb；顶层先仲裁，再按 squash 年龄边界过滤 done/write。
+- wb_arb.done_tag/valid 只接 ROB；write_* 只控制 PRF 写入。各 FU 的已锁存 result_valid/pdst 接 Rename 和两 IQ 的 wake_*，同时接 PRF 的 forward_*；控制流 npc 不进入完成转发。
+- ROB.reg_commit_* 只接 Rename（仅携带 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/DCache/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
+- Fetch→ICache 使用带 count 的包请求/响应；ICache→桥的 IF 与 DCache→桥的 LD 请求和响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
 - 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；也不再有 epoch 池相关端口。PRF 不接 squash，写入由 WB 筛选后的 write_valid 控制。外部 AXI 端口保持。
 
 ## 15. Instruction Cache 验证
@@ -1194,6 +1191,63 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 
 历史紧凑配置（提交 f3ed8dd，D=I=W=C=1、K=1）实测：`make synth CLOCK_PERIOD_NS=3.333` 的 estimated_fmax_mhz 为 331.42 MHz，minimum_period_ns 为 3.0173 ns，worst_setup_slack_ns 为 +0.3161 ns，总面积为 6569.85 μm²。优化前同一工具链的频率约 131.34 MHz、面积 13115.85 μm²；容量变化与额外 WB/唤醒延迟使六项性能测试 IPC 几何平均从 0.2503 降至 0.2166。
 
-当前默认 D=I=W=C=2、K=4、BTB=64、BHT=256：双宽派遣与 Rename 输入重叠减少前端空拍，双宽发射/写回/提交增加后端吞吐，四个 checkpoint 允许多个未解析分支并行在途，扩大预测表减少索引冲突。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
+历史提交 ccb3088 默认 D=I=W=C=2、K=4、BTB=64、BHT=256：双宽派遣与 Rename 输入重叠减少前端空拍，双宽发射/写回/提交增加后端吞吐，四个 checkpoint 允许多个未解析分支并行在途，扩大预测表减少索引冲突。每项调整单独提交，由 post-commit 的 `scripts/report.py` 测量全部性能、正确性和综合结果；当前配置的 IPC 与频率以对应提交的 `report/` 报告为准。
 
-提交 ccb3088 的六项性能测试 IPC 几何平均为 0.3039，相比起点 82187b7 的 0.2166 提高 40.29%，每项 IPC 均提升；19 项 correctness 全部通过。相同 RTL 的 `make synth CLOCK_PERIOD_NS=3.333` 实测 estimated_fmax_mhz=411.98、minimum_period_ns=2.4273、worst_setup_slack_ns=+0.9057，总面积为 12304.86 μm²；结果保存在 `build/ipc-validation/synth-300/opt/`。定向回归 `make test-timing`、`make test-branch`、`make test-icache` 全部通过，包含 SV2005 连续派遣/跨包 RAW/部分派遣及恢复测试。这些数值是既有库与无布线寄生模型下的综合估计。
+提交 ccb3088 的六项性能测试 IPC 几何平均为 0.3039，相比起点 82187b7 的 0.2166 提高 40.29%，每项 IPC 均提升；19 项 correctness 全部通过。当时使用现已撤销的映射设置，`make synth CLOCK_PERIOD_NS=3.333` 记录 estimated_fmax_mhz=411.98、minimum_period_ns=2.4273、worst_setup_slack_ns=+0.9057，总面积为 12304.86 μm²；结果保存在 `build/ipc-validation/synth-300/opt/`。定向回归 `make test-timing`、`make test-branch`、`make test-icache` 全部通过，包含 SV2005 连续派遣/跨包 RAW/部分派遣及恢复测试。这些数值是既有库与无布线寄生模型下的综合估计。
+
+## 18. IPC 优化工作与 Data Cache 接口
+
+当前工作配置为 D=4、I=W=C=2、R=32、P=64、LQ=SQ=8、F=16。调度器、LSU 结果及请求缓冲支持消费与补入同拍；Rename/ROB/IQ 的空闲槽提前准备载荷，仅有效位发布派遣，不覆盖仍被使用的槽或背压 offer。
+
+DCache 为直接映射、write-back/write-allocate，数据按行内字分为独立的单端口同步 sram_fakeram bank。命中只访问对应字 bank，victim 读取全部 bank；地址/使能在 bank 内分发。tag 比较和更新以 16 组为单位分发控制和 tag 数据。命中接受一条字请求/拍，Store 按 byte strobe 更新对应字。一次 miss 占用控制器；脏 victim 逐字写回并等待全部 B，再从请求字开始环绕填充整行。Load 关键字返回时立即以原始 {gen,LQ id} 回复 LSU，其余字继续填充。恢复不取消物理填充，不丢失已提交脏数据。复位清 valid/dirty/control，不清 SRAM/tag。非 RAM Store 先排空全部脏行，再发送原始 MMIO 写，等待自身 B 完成。
+
+CPU ld_req/ld_rsp 为 GEN_WIDTH+LIDW+32 位；Cache 到桥的 mem_ld_req/mem_ld_rsp 为 GEN_WIDTH+WORD_W+32，id 表示行内字号。请求保持到 ready，响应无 ready、每笔只发一次。Cache 的 st_rsp 表示 RAM 更新或 MMIO 完成；桥的 mem_st_rsp 始终表示真实 B 握手。
+
+`make test-timing` 增加 tb/dcache.sv，以 SV2005 覆盖 16/32/64 B 行和单组配置、关键字提前返回、脏替换、byte 合并、复位、MMIO 排空，跨 tag 控制分组的脏写排空，以及深度 3 写队列的 AW/W 独立背压和回绕。还包含 LSU generation/Store 消歧测试：恢复边沿已接受的 RAM 读保持旧身份返回，清除的槽只归还额度；复用槽以新 generation 接收新响应。
+
+2026-10-02 中间验证：组合候选/写回、PRF 写入旁路版本六项 make perf 的 IPC 几何平均为 0.6259，19 项 make test 全通过。随后按字分 bank、恢复边沿读请求身份过滤和队列排名分配版本的 IPC 为 0.6202。按字分 bank 版本 estimated_fmax_mhz=80.55、minimum_period_ns=12.4149、worst_setup_slack_ns=-9.0813（3.333 ns 目标），尚未达标。截至本次暂停，完成结果直接转发阶段的六项 IPC 为 0.6208，19 项 correctness 全通过；最终控制分发 RTL 的 3.333 ns 综合估计为 114.11 MHz，minimum_period_ns=8.7638、worst_setup_slack_ns=-5.4307，总面积 30221.24 μm²，报告输入 SHA-256 与当前源码一致。开发已暂停，300 MHz 尚未达到，不能以性能结果或 make synth 返回码宣称目标已完成。历史 ccb3088 的 411.98 MHz 使用了之后被撤销的映射设置，不证明当前频率达标；验收保持原 scripts/synth.py、ASAP7/OpenSTA 约束和全六项性能统计。
+
+### 18.1 `dcache`
+
+```systemverilog
+module dcache #(
+    parameter integer SIZE_BYTES = 4096,
+    parameter integer LINE_BYTES = 32,
+    parameter integer LQ_DEPTH = 4,
+    parameter integer GEN_WIDTH = 16,
+    parameter integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1,
+    parameter integer WORDS = LINE_BYTES / 4,
+    parameter integer WORD_W = (WORDS > 1) ? $clog2(WORDS) : 1,
+    parameter integer LD_BITS = GEN_WIDTH + LIDW + 32,
+    parameter integer MEM_LD_BITS = GEN_WIDTH + WORD_W + 32
+) (
+    input wire clock, reset,
+    input wire ld_req_valid,
+    output wire ld_req_ready,
+    input wire [LD_BITS-1:0] ld_req_payload,
+    output wire ld_rsp_valid,
+    output wire [LD_BITS-1:0] ld_rsp_payload,
+    input wire st_req_valid,
+    output wire st_req_ready,
+    input wire [67:0] st_req_payload,
+    output wire st_rsp_valid,
+    output wire mem_ld_req_valid,
+    input wire mem_ld_req_ready,
+    output wire [MEM_LD_BITS-1:0] mem_ld_req_payload,
+    input wire mem_ld_rsp_valid,
+    input wire [MEM_LD_BITS-1:0] mem_ld_rsp_payload,
+    output wire mem_st_req_valid,
+    input wire mem_st_req_ready,
+    output wire [67:0] mem_st_req_payload,
+    input wire mem_st_rsp_valid
+);
+endmodule
+```
+
+### 18.2 控制信号分发与完成结果转发
+
+signal_fanout 使用分支数最多为 4 的树，每条支路由两个反相器组成。keep_hierarchy/keep 保留缓冲边界，使标准单元映射后仍有真实的分发级；无状态、无协议延迟。ROB head 与恢复广播分别向各后端消费者分发；发射队列和调度器的选择及载荷使能按最多 16 位一组分发，PRF 的 bank 选择、写入数据和逐字写使能也分组分发。所有缓冲均参与原综合脚本的面积和 OpenSTA 时序统计。
+
+顶层从 I 路 ALU、MULDIV 和 LSU 的已锁存完成结果产生 I+2 路唤醒和操作数转发，独立于 W 路写回端口。PRF 的 forward_valid/forward_pdst/forward_value 只覆盖组合读值，write_* 仍控制唯一真实写入；p0 始终为零，reset 时不转发。物理目的在活跃指令之间唯一，恢复边界后的年轻结果不会成为存活较老指令的源；恢复边沿取消年轻 FU/候选，之后物理寄存器才可重新分配。
+
+调度器按年龄选择和准备数据，恢复只在执行有效位发布处过滤年轻项。cand_take 可以消费被取消的年轻候选，不能使其在恢复后再次执行。FILTER_AFTER_SELECT=1 时写回仲裁先选择原始有效源，再过滤 done_valid/write_valid；源 ready 和指针不依赖 squash，未选择的年轻结果由所属 FU 在恢复边沿取消。默认 FILTER_AFTER_SELECT=0 保留先过滤再仲裁的行为。

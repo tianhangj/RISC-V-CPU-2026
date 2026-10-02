@@ -1,20 +1,22 @@
 module student_top #(
     parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 2,
+    parameter integer DISPATCH_WIDTH = 4,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
     
-    parameter integer ROB_DEPTH = 16,
-    parameter integer PRF_SIZE = 48,
+    parameter integer ROB_DEPTH = 32,
+    parameter integer PRF_SIZE = 64,
     parameter integer IQ_ALU_DEPTH = 8,
     parameter integer IQ_MEM_DEPTH = 8,
-    parameter integer LQ_DEPTH = 4,
-    parameter integer SQ_DEPTH = 4,
-    parameter integer FETCH_QUEUE_DEPTH = 8,
-    parameter integer IFETCH_OUTSTANDING = 4,
+    parameter integer LQ_DEPTH = 8,
+    parameter integer SQ_DEPTH = 8,
+    parameter integer FETCH_QUEUE_DEPTH = 16,
+    parameter integer IFETCH_OUTSTANDING = 8,
     parameter integer ICACHE_SIZE_BYTES = 1024,
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
+    parameter integer DCACHE_SIZE_BYTES = 16384,
+    parameter integer DCACHE_LINE_BYTES = 32,
     parameter integer BP_ENABLE = 1,
     parameter integer BTB_ENTRIES = 64,
     parameter integer BHT_ENTRIES = 256,
@@ -76,6 +78,12 @@ module student_top #(
     localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32*DISPATCH_WIDTH;
     localparam integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32;
     localparam integer WRITE_REQ_BITS = 68;
+    localparam integer DC_WORD_W = $clog2(DCACHE_LINE_BYTES/4);
+    localparam integer MEM_LD_BITS = GEN_WIDTH + DC_WORD_W + 32;
+    wire mem_ld_req_valid, mem_ld_req_ready, mem_ld_rsp_valid;
+    wire [MEM_LD_BITS-1:0] mem_ld_req_payload, mem_ld_rsp_payload;
+    wire mem_st_req_valid, mem_st_req_ready, mem_st_rsp_valid;
+    wire [67:0] mem_st_req_payload;
 
     logic if_req_valid, if_req_ready, if_rsp_valid;
     logic [IF_REQ_BITS-1:0] if_req_payload, if_rsp_payload;
@@ -109,6 +117,7 @@ module student_top #(
     logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq;
     logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready;
     logic [DISPATCH_WIDTH-1:0] alu_disp_valid, mem_disp_valid;
+    logic [DISPATCH_WIDTH-1:0] alu_disp_prepare, mem_disp_prepare;
     logic [ROB_CW-1:0] rob_free;
     logic [AIQ_CW-1:0] alu_iq_free;
     logic [MIQ_CW-1:0] mem_iq_free;
@@ -145,17 +154,38 @@ module student_top #(
     logic [WB_WIDTH*RW-1:0] done_tag;
     logic [WB_WIDTH*PW-1:0] write_pdst;
     logic [WB_WIDTH*32-1:0] write_value;
+    localparam integer COMPLETION_WIDTH = ISSUE_WIDTH+2;
+    wire [COMPLETION_WIDTH-1:0] completion_valid =
+        {lsu_result_valid, mul_result_valid, alu_result_valid};
+    wire [COMPLETION_WIDTH*RESULT_BITS-1:0] completion_payload =
+        {lsu_result_payload, mul_result_payload, alu_result_payload};
+    wire [COMPLETION_WIDTH*PW-1:0] completion_pdst;
+    wire [COMPLETION_WIDTH*32-1:0] completion_value;
+    for (genvar source = 0; source < COMPLETION_WIDTH; source = source+1) begin : g_completion
+        assign completion_pdst[source*PW +: PW] = completion_payload[source*RESULT_BITS+32 +: PW];
+        assign completion_value[source*32 +: 32] = completion_payload[source*RESULT_BITS +: 32];
+    end
+    wire [(ISSUE_WIDTH+7)*RW-1:0] distributed_head;
+    wire [(ISSUE_WIDTH+9)*(RW+1)-1:0] distributed_squash;
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(RW), .BRANCHES(ISSUE_WIDTH+7))
+        distribute_head(rob_head, distributed_head);
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(RW+1), .BRANCHES(ISSUE_WIDTH+9))
+        distribute_recovery({squash_valid, squash_tag}, distributed_squash);
     integer need_alu, need_mem, need_lq, need_sq;
     logic [1:0] lane_kind;
 
-    always @(disp_rob or disp_count or disp_fire or squash_valid or rob_free or
+    always @(disp_rob or disp_count or disp_fire or distributed_squash or rob_free or
              alu_iq_free or mem_iq_free or lq_free or sq_free) begin
         need_alu = 0; need_mem = 0; need_lq = 0; need_sq = 0;
         alu_disp_valid = 0;
         mem_disp_valid = 0;
+        alu_disp_prepare = 0;
+        mem_disp_prepare = 0;
         for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
             lane_kind = disp_rob[lane*ROB_ALLOC_BITS+SIDW +: 2];
             if (lane < disp_count) begin
+                alu_disp_prepare[lane] = !(lane_kind == 2 || lane_kind == 3);
+                mem_disp_prepare[lane] = (lane_kind == 2 || lane_kind == 3);
                 if (lane_kind == 2 || lane_kind == 3) begin
                     need_mem = need_mem + 1;
                     if (lane_kind == 2) need_lq = need_lq + 1;
@@ -167,7 +197,7 @@ module student_top #(
                 mem_disp_valid[lane] = (lane_kind == 2 || lane_kind == 3);
             end
         end
-        disp_ready = !squash_valid && rob_free >= disp_count &&
+        disp_ready = !distributed_squash[8*(RW+1)+RW] && rob_free >= disp_count &&
             alu_iq_free >= need_alu && mem_iq_free >= need_mem &&
             lq_free >= need_lq && sq_free >= need_sq;
     end
@@ -192,66 +222,68 @@ module student_top #(
     decode #(.DISPATCH_WIDTH(DISPATCH_WIDTH)) u_decode (
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet,
         .decode_valid, .decode_ready, .decode_count, .decode_uop);
-    rename #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH),
+    rename #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(COMPLETION_WIDTH),
         .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .IQ_MEM_DEPTH(IQ_MEM_DEPTH),
         .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_rename (
-        .clock, .reset, .squash_valid, .restore_cp_id, .cp_release_mask,
+        .clock, .reset, .squash_valid(distributed_squash[(0)*(RW+1)+RW]), .restore_cp_id, .cp_release_mask,
         .cp_free, .cp_alloc_id, .decode_valid, .decode_ready, .decode_count, .decode_uop,
         .rob_free, .rob_tail, .alu_iq_free, .mem_iq_free, .lq_free, .sq_free,
         .lq_alloc_id, .sq_alloc_id, .disp_valid, .disp_ready, .disp_count,
         .disp_rob, .disp_alu, .disp_mem, .disp_lsq,
         .disp_src1_ready, .disp_src2_ready, .cp_alloc_valid, .cp_alloc_payload,
         .front_redirect_valid, .front_redirect_pc,
-        .wake_valid(write_valid), .wake_pdst(write_pdst),
+        .wake_valid(completion_valid), .wake_pdst(completion_pdst),
         .reg_commit_valid, .reg_commit_payload);
     rob #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH),
         .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .SQ_DEPTH(SQ_DEPTH)) u_rob (
-        .clock, .reset, .squash_valid, .squash_tag,
+        .clock, .reset, .squash_valid(distributed_squash[(1)*(RW+1)+RW]), .squash_tag(distributed_squash[(1)*(RW+1) +: RW]),
         .disp_fire, .disp_count, .disp_rob, .done_valid, .done_tag,
         .rob_free, .rob_tail, .rob_head, .reg_commit_valid, .reg_commit_payload,
         .st_start_valid, .st_start_id, .st_done_valid);
     branch_ctrl #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .ROB_DEPTH(ROB_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH),
         .GEN_WIDTH(GEN_WIDTH)) u_branch (
-        .clock, .reset, .rob_head, .current_gen, .cp_free, .cp_alloc_id,
+        .clock, .reset, .rob_head(distributed_head[(0)*RW +: RW]), .current_gen, .cp_free, .cp_alloc_id,
         .cp_alloc_valid, .cp_alloc_payload, .front_redirect_valid, .front_redirect_pc,
         .resolve_valid, .resolve_payload, .cp_release_mask,
         .train_valid, .train_payload,
         .squash_valid, .squash_tag, .restore_cp_id,
         .fetch_redirect_valid, .fetch_redirect_payload);
-    iq_alu #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
-        .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
+    iq_alu #(.PIPELINED(0), .ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
+        .WB_WIDTH(COMPLETION_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_iq_alu (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
-        .disp_valid(alu_disp_valid), .disp_uop(disp_alu),
-        .disp_src1_ready, .disp_src2_ready, .wake_valid(write_valid), .wake_pdst(write_pdst),
+        .clock, .reset, .squash_valid(distributed_squash[(2)*(RW+1)+RW]), .squash_tag(distributed_squash[(2)*(RW+1) +: RW]), .rob_head(distributed_head[(1)*RW +: RW]),
+        .disp_valid(alu_disp_valid), .disp_prepare(alu_disp_prepare), .disp_uop(disp_alu),
+        .disp_src1_ready, .disp_src2_ready, .wake_valid(completion_valid), .wake_pdst(completion_pdst),
         .alu_iq_free, .cand_valid(alu_cand_valid), .cand_uop(alu_cand_uop),
         .cand_take(alu_cand_take));
-    iq_mem #(.DISPATCH_WIDTH(DISPATCH_WIDTH),
-        .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
+    iq_mem #(.PIPELINED(0), .DISPATCH_WIDTH(DISPATCH_WIDTH),
+        .WB_WIDTH(COMPLETION_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .IQ_MEM_DEPTH(IQ_MEM_DEPTH), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH)) u_iq_mem (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
-        .disp_valid(mem_disp_valid), .disp_uop(disp_mem),
-        .disp_src1_ready, .disp_src2_ready, .wake_valid(write_valid), .wake_pdst(write_pdst),
+        .clock, .reset, .squash_valid(distributed_squash[(3)*(RW+1)+RW]), .squash_tag(distributed_squash[(3)*(RW+1) +: RW]), .rob_head(distributed_head[(2)*RW +: RW]),
+        .disp_valid(mem_disp_valid), .disp_prepare(mem_disp_prepare), .disp_uop(disp_mem),
+        .disp_src1_ready, .disp_src2_ready, .wake_valid(completion_valid), .wake_pdst(completion_pdst),
         .mem_iq_free, .cand_valid(mem_cand_valid), .cand_uop(mem_cand_uop),
         .cand_take(mem_cand_take));
     issue_sched #(.ISSUE_WIDTH(ISSUE_WIDTH), .ROB_DEPTH(ROB_DEPTH),
         .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH),
         .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_issue (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+        .clock, .reset, .squash_valid(distributed_squash[(4)*(RW+1)+RW]), .squash_tag(distributed_squash[(4)*(RW+1) +: RW]), .rob_head(distributed_head[(3)*RW +: RW]),
         .alu_cand_valid, .alu_cand_uop, .alu_cand_take,
         .mem_cand_valid, .mem_cand_uop, .mem_cand_take,
         .rd_addr, .rd_data, .alu_exec_valid, .alu_exec_ready, .alu_exec_payload,
         .mul_exec_valid, .mul_exec_ready, .mul_exec_payload,
         .mem_exec_valid, .mem_exec_ready, .mem_exec_payload);
-    prf #(.ISSUE_WIDTH(ISSUE_WIDTH), .WB_WIDTH(WB_WIDTH), .PRF_SIZE(PRF_SIZE)) u_prf (
-        .clock, .reset, .rd_addr, .rd_data, .write_valid, .write_pdst, .write_value);
+    prf #(.BYPASS_WRITE(1), .ISSUE_WIDTH(ISSUE_WIDTH), .WB_WIDTH(WB_WIDTH),
+        .FORWARD_WIDTH(COMPLETION_WIDTH), .PRF_SIZE(PRF_SIZE)) u_prf (
+        .clock, .reset, .rd_addr, .rd_data, .write_valid, .write_pdst, .write_value,
+        .forward_valid(completion_valid), .forward_pdst(completion_pdst), .forward_value(completion_value));
     for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin : g_alu
         alu #(.ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
             .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_alu (
-            .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+            .clock, .reset, .squash_valid(distributed_squash[(9+lane)*(RW+1)+RW]), .squash_tag(distributed_squash[(9+lane)*(RW+1) +: RW]), .rob_head(distributed_head[(7+lane)*RW +: RW]),
             .exec_valid(alu_exec_valid[lane]), .exec_ready(alu_exec_ready[lane]),
             .exec_payload(alu_exec_payload[lane*ALU_EXEC_BITS +: ALU_EXEC_BITS]),
             .result_valid(alu_result_valid[lane]), .result_ready(alu_result_ready[lane]),
@@ -260,14 +292,14 @@ module student_top #(
             .resolve_payload(resolve_payload[lane*RESOLVE_BITS +: RESOLVE_BITS]));
     end
     mul_div #(.ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE)) u_mul_div (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+        .clock, .reset, .squash_valid(distributed_squash[(5)*(RW+1)+RW]), .squash_tag(distributed_squash[(5)*(RW+1) +: RW]), .rob_head(distributed_head[(4)*RW +: RW]),
         .exec_valid(mul_exec_valid), .exec_ready(mul_exec_ready), .exec_payload(mul_exec_payload),
         .result_valid(mul_result_valid), .result_ready(mul_result_ready),
         .result_payload(mul_result_payload));
     lsu #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .ROB_DEPTH(ROB_DEPTH),
         .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH),
         .LOAD_OUTSTANDING(LOAD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH)) u_lsu (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head, .current_gen,
+        .clock, .reset, .squash_valid(distributed_squash[(6)*(RW+1)+RW]), .squash_tag(distributed_squash[(6)*(RW+1) +: RW]), .rob_head(distributed_head[(5)*RW +: RW]), .current_gen,
         .disp_valid(mem_disp_valid), .disp_lsq, .lq_free, .sq_free,
         .lq_alloc_id, .sq_alloc_id,
         .exec_valid(mem_exec_valid), .exec_ready(mem_exec_ready), .exec_payload(mem_exec_payload),
@@ -276,20 +308,31 @@ module student_top #(
         .st_start_valid, .st_start_id, .st_done_valid,
         .ld_req_valid, .ld_req_ready, .ld_req_payload, .ld_rsp_valid, .ld_rsp_payload,
         .st_req_valid, .st_req_ready, .st_req_payload, .st_rsp_valid);
-    wb_arb #(.PIPELINED(1), .ISSUE_WIDTH(ISSUE_WIDTH), .WB_WIDTH(WB_WIDTH),
+    wb_arb #(.PIPELINED(0), .FILTER_AFTER_SELECT(1), .ISSUE_WIDTH(ISSUE_WIDTH), .WB_WIDTH(WB_WIDTH),
         .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE)) u_wb (
-        .clock, .reset, .squash_valid, .squash_tag, .rob_head,
+        .clock, .reset, .squash_valid(distributed_squash[(7)*(RW+1)+RW]), .squash_tag(distributed_squash[(7)*(RW+1) +: RW]), .rob_head(distributed_head[(6)*RW +: RW]),
         .alu_result_valid, .alu_result_ready, .alu_result_payload,
         .mul_result_valid, .mul_result_ready, .mul_result_payload,
         .lsu_result_valid, .lsu_result_ready, .lsu_result_payload,
         .done_valid, .done_tag, .write_valid, .write_pdst, .write_value);
-    axi_bridge #(.LQ_DEPTH(LQ_DEPTH), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
+    dcache #(.SIZE_BYTES(DCACHE_SIZE_BYTES), .LINE_BYTES(DCACHE_LINE_BYTES),
+        .LQ_DEPTH(LQ_DEPTH), .GEN_WIDTH(GEN_WIDTH)) u_dcache (
+        .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
+        .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,
+        .st_req_payload, .st_rsp_valid,
+        .mem_ld_req_valid, .mem_ld_req_ready, .mem_ld_req_payload,
+        .mem_ld_rsp_valid, .mem_ld_rsp_payload, .mem_st_req_valid,
+        .mem_st_req_ready, .mem_st_req_payload, .mem_st_rsp_valid);
+    axi_bridge #(.LQ_DEPTH(DCACHE_LINE_BYTES/4), .FETCH_QUEUE_DEPTH(FETCH_QUEUE_DEPTH),
         .AXI_RD_OUTSTANDING(AXI_RD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH),
         .IF_ID_WIDTH(IF_ID_WIDTH)) u_axi (
         .clock, .reset, .if_req_valid, .if_req_ready, .if_req_payload,
-        .if_rsp_valid, .if_rsp_payload, .ld_req_valid, .ld_req_ready, .ld_req_payload,
-        .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready, .st_req_payload,
-        .st_rsp_valid, .araddr, .arvalid, .arready, .rdata, .rresp, .rvalid,
+        .if_rsp_valid, .if_rsp_payload,
+        .ld_req_valid(mem_ld_req_valid), .ld_req_ready(mem_ld_req_ready),
+        .ld_req_payload(mem_ld_req_payload), .ld_rsp_valid(mem_ld_rsp_valid),
+        .ld_rsp_payload(mem_ld_rsp_payload), .st_req_valid(mem_st_req_valid),
+        .st_req_ready(mem_st_req_ready), .st_req_payload(mem_st_req_payload),
+        .st_rsp_valid(mem_st_rsp_valid), .araddr, .arvalid, .arready, .rdata, .rresp, .rvalid,
         .rready, .awaddr, .awvalid, .awready, .wdata, .wstrb, .wvalid,
         .wready, .bresp, .bvalid, .bready);
 endmodule

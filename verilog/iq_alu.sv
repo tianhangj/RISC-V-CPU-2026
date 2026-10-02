@@ -14,7 +14,7 @@ module iq_core #(
 ) (
     input logic clock, reset, squash_valid,
     input logic [RW-1:0] squash_tag, rob_head,
-    input logic [DISPATCH_WIDTH-1:0] disp_valid,
+    input logic [DISPATCH_WIDTH-1:0] disp_valid, disp_prepare,
     input logic [DISPATCH_WIDTH*UOP_BITS-1:0] disp_uop,
     input logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     input logic [WB_WIDTH-1:0] wake_valid,
@@ -32,20 +32,32 @@ module iq_core #(
     end
     localparam integer TREE_LEAVES = 2 ** $clog2(DEPTH);
     localparam integer SLOT_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;
-    logic [DEPTH-1:0] candidate_used, allocated;
+    logic [DEPTH-1:0] candidate_used;
+    logic [DEPTH-1:0] alloc_select [0:DISPATCH_WIDTH-1];
+    logic [CW-1:0] free_rank [0:DEPTH-1];
+    logic [CW-1:0] lane_rank [0:DISPATCH_WIDTH-1];
     logic [DEPTH-1:0] cand_select [0:ISSUE_WIDTH-1];
     logic [DEPTH-1:0] ready_candidate;
+    localparam integer PAYLOAD_GROUPS = (UOP_BITS+15)/16;
+    wire [ISSUE_WIDTH*DEPTH*PAYLOAD_GROUPS-1:0] candidate_mask;
+    for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane+1) begin : g_candidate_fanout
+        for (genvar slot = 0; slot < DEPTH; slot = slot+1) begin : g_slot
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PAYLOAD_GROUPS)) distribute(
+                cand_select[lane][slot],
+                candidate_mask[(lane*DEPTH+slot)*PAYLOAD_GROUPS +: PAYLOAD_GROUPS]);
+        end
+    end
     logic [RW-1:0] slot_age [0:DEPTH-1];
     logic tree_valid [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
     logic [RW-1:0] tree_age [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
     logic [SLOT_W-1:0] tree_slot [0:ISSUE_WIDTH-1][1:2*TREE_LEAVES-1];
     integer alloc_slot [0:DISPATCH_WIDTH-1];
-    integer choice, free_temp;
+    integer free_temp;
     logic [PW-1:0] ps1, ps2;
     logic [PW-1:0] select_ps1, select_ps2;
     logic select_ready1, select_ready2;
     logic w1, w2;
-    always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_valid or
+    always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_prepare or
              wake_valid or wake_pdst) begin
         for (int s = 0; s < DEPTH; s = s + 1) begin
             slot_age[s] = entry[s][UOP_BITS-1 -: RW] - rob_head;
@@ -69,7 +81,6 @@ module iq_core #(
         free_count = CW'(free_temp);
         candidate_used = 0;
         cand_valid = 0;
-        cand_uop = 0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
             cand_select[lane] = 0;
             for (int leaf = 0; leaf < TREE_LEAVES; leaf = leaf + 1) begin
@@ -95,18 +106,48 @@ module iq_core #(
             cand_valid[lane] = tree_valid[lane][1];
             for (int s = 0; s < DEPTH; s = s + 1) begin
                 cand_select[lane][s] = tree_valid[lane][1] && tree_slot[lane][1] == SLOT_W'(s);
-                cand_uop[lane*UOP_BITS +: UOP_BITS] |=
-                    entry[s] & {UOP_BITS{cand_select[lane][s]}};
             end
             candidate_used |= cand_select[lane];
         end
-        allocated = 0;
-        for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
-            choice = -1;
-            for (int s = 0; s < DEPTH; s = s + 1)
-                if (choice < 0 && !valid_q[s] && !allocated[s]) choice = s;
-            alloc_slot[lane] = choice;
-            if (choice >= 0 && disp_valid[lane]) allocated[choice] = 1;
+        // Match each dispatch lane's rank to a free slot's rank. Payload
+        // preparation depends on packet contents, before the dispatch handshake.
+        for (int s = 0; s < DEPTH; s = s+1) begin
+            free_rank[s] = 0;
+            for (int older = 0; older < s; older = older+1)
+                free_rank[s] = free_rank[s] + CW'(!valid_q[older]);
+        end
+        for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin
+            lane_rank[lane] = 0;
+            for (int older = 0; older < lane; older = older+1)
+                lane_rank[lane] = lane_rank[lane] + CW'(disp_prepare[older]);
+            alloc_select[lane] = 0;
+            alloc_slot[lane] = -1;
+            for (int s = 0; s < DEPTH; s = s+1) begin
+                alloc_select[lane][s] = !valid_q[s] && free_rank[s] == lane_rank[lane];
+                if (alloc_select[lane][s]) alloc_slot[lane] = s;
+            end
+        end
+    end
+    always @(entry_flat or candidate_mask) begin
+        cand_uop = 0;
+        for (int lane = 0; lane < ISSUE_WIDTH; lane = lane+1)
+            for (int slot = 0; slot < DEPTH; slot = slot+1)
+                for (int bit_no = 0; bit_no < UOP_BITS; bit_no = bit_no+1)
+                    cand_uop[lane*UOP_BITS+bit_no] |= entry[slot][bit_no] &
+                        candidate_mask[(lane*DEPTH+slot)*PAYLOAD_GROUPS+bit_no/16];
+    end
+    for (genvar slot = 0; slot < DEPTH; slot = slot+1) begin : g_prepare_entry
+        wire [DISPATCH_WIDTH*PAYLOAD_GROUPS-1:0] payload_enable;
+        for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_lane
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PAYLOAD_GROUPS)) distribute(
+                disp_prepare[lane] && alloc_select[lane][slot],
+                payload_enable[lane*PAYLOAD_GROUPS +: PAYLOAD_GROUPS]);
+        end
+        for (genvar bit_no = 0; bit_no < UOP_BITS; bit_no = bit_no+1) begin : g_payload_bit
+            always_ff @(posedge clock)
+                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1)
+                    if (payload_enable[lane*PAYLOAD_GROUPS+bit_no/16])
+                        entry[slot][bit_no] <= disp_uop[lane*UOP_BITS+bit_no];
         end
     end
     always_ff @(posedge clock) begin
@@ -133,7 +174,6 @@ module iq_core #(
                     if (cand_take[lane] && cand_select[lane][s]) valid_q[s] <= 0;
             for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
                 if (disp_valid[lane] && alloc_slot[lane] >= 0 && !squash_valid) begin
-                    entry[alloc_slot[lane]] <= disp_uop[lane*UOP_BITS +: UOP_BITS];
                     valid_q[alloc_slot[lane]] <= 1;
                     ps1 = disp_uop[lane*UOP_BITS+SRC2_LSB+PW +: PW];
                     ps2 = disp_uop[lane*UOP_BITS+SRC2_LSB +: PW];
@@ -152,6 +192,7 @@ module iq_core #(
 endmodule
 
 module iq_alu #(
+    parameter integer PIPELINED = 1,
     parameter integer ISSUE_WIDTH = 2, DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_ALU_DEPTH = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -165,7 +206,7 @@ module iq_alu #(
     input logic clock, reset, squash_valid,
     input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
-    input logic [DISPATCH_WIDTH-1:0] disp_valid,
+    input logic [DISPATCH_WIDTH-1:0] disp_valid, disp_prepare,
     input logic [DISPATCH_WIDTH*ALU_IQ_BITS-1:0] disp_uop,
     input logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     input logic [WB_WIDTH-1:0] wake_valid,
@@ -186,14 +227,19 @@ module iq_alu #(
     iq_core #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_ALU_DEPTH), .UOP_BITS(ALU_IQ_BITS), .SRC2_LSB(64),
-        .BYPASS_WAKE(0),
+        .BYPASS_WAKE(1),
         .RW(RW), .PW(PW), .CW(AIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
-        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(alu_iq_free),
         .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
         .cand_take(iq_cand_take));
 
+    generate if (PIPELINED == 0) begin : g_direct
+        assign cand_valid = iq_cand_valid;
+        assign cand_uop = iq_cand_uop;
+        assign iq_cand_take = cand_take;
+    end else begin : g_pipeline
     for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin : g_candidate_output
         wire [RW-1:0] age = candidate_reg[lane][ALU_IQ_BITS-1 -: RW] - rob_head;
         assign cand_valid[lane] = candidate_valid_q[lane] &&
@@ -258,4 +304,5 @@ module iq_alu #(
                 candidate_reg[lane] <= candidate_next[lane];
         end
     end
+    end endgenerate
 endmodule

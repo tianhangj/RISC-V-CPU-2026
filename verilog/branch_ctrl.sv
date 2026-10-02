@@ -117,6 +117,16 @@ module branch_ctrl #(
         if (!squash_valid) redirect_pc = front_redirect_pc;
         fetch_redirect_payload = {redirect_pc, (current_gen + 1'b1)};
     end
+    for (genvar c = 0; c < CHECKPOINT_DEPTH; c = c+1) begin : g_prepare_checkpoint
+        always_ff @(posedge clock)
+            if (!cp_valid[c])
+                for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1)
+                    if (cp_alloc_valid[lane] &&
+                        cp_alloc_payload[lane*CP_ALLOC_BITS+32+TAG_BITS +: CIDW] == CIDW'(c)) begin
+                        cp_tag[c] <= cp_alloc_payload[lane*CP_ALLOC_BITS+32 +: TAG_BITS];
+                        cp_pred_npc[c] <= cp_alloc_payload[lane*CP_ALLOC_BITS +: 32];
+                    end
+    end
     always_ff @(posedge clock) begin
         if (reset) begin
             cp_valid <= 0;
@@ -130,8 +140,6 @@ module branch_ctrl #(
                     if (cp_alloc_valid[lane]) begin
                         candidate = cp_alloc_payload[lane*CP_ALLOC_BITS+32+TAG_BITS +: CIDW];
                         cp_valid[candidate] <= 1;
-                        cp_tag[candidate] <= cp_alloc_payload[lane*CP_ALLOC_BITS+32 +: TAG_BITS];
-                        cp_pred_npc[candidate] <= cp_alloc_payload[lane*CP_ALLOC_BITS +: 32];
                     end
         end
     end

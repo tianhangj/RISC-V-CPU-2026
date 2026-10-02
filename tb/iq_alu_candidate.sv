@@ -18,7 +18,7 @@ module iq_alu_candidate_test;
 
     iq_alu #(.IQ_ALU_DEPTH(4)) dut (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
-        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .disp_valid, .disp_prepare(disp_valid), .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .alu_iq_free,
         .cand_valid, .cand_uop, .cand_take
     );
@@ -113,13 +113,13 @@ module iq_alu_candidate_test;
         #1;
         expect_candidates(2'b00, 0, 0);
         tick();
-        expect_candidates(2'b00, 0, 0);
-        if (alu_iq_free !== 3'd3) $fatal(1, "wake must first update readiness");
+        expect_candidates(2'b01, 5'd6, 0);
+        if (alu_iq_free !== 3'd4) $fatal(1, "wake did not transfer at the writeback edge");
         @(negedge clock);
         wake_valid = 0;
         tick();
         expect_candidates(2'b01, 5'd6, 0);
-        if (alu_iq_free !== 3'd4) $fatal(1, "registered wake did not transfer");
+        if (alu_iq_free !== 3'd4) $fatal(1, "wake candidate was duplicated");
 
         $display("iq_alu candidate stage PASS");
         $finish;

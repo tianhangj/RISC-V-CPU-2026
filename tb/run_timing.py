@@ -27,13 +27,18 @@ def main():
         verilator = verilator_command(args.verilator)
         tests = [
             ("wb_pipeline_test", ["verilog/wb_arb.sv", "tb/wb_pipeline.sv"], []),
+            ("wb_late_filter_test", ["verilog/wb_arb.sv", "tb/wb_late_filter.sv"], []),
             ("rename_checkpoint_test", ["verilog/rename.sv", "tb/rename_checkpoint.sv"], []),
             ("rename_stream_test", ["verilog/rename.sv", "tb/rename_stream.sv"], []),
-            ("iq_alu_candidate_test", ["verilog/iq_alu.sv", "tb/iq_alu_candidate.sv"], []),
-            ("iq_mem_candidate_test", ["verilog/iq_alu.sv", "verilog/iq_mem.sv", "tb/iq_mem_candidate.sv"], []),
-            ("selection_tree_test", ["verilog/iq_alu.sv", "verilog/issue_sched.sv", "tb/selection_tree.sv"], []),
-            ("prf_hierarchical_test", ["verilog/prf.sv", "tb/prf_hierarchical.sv"], []),
+            ("iq_alu_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "tb/iq_alu_candidate.sv"], []),
+            ("iq_mem_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/iq_mem.sv", "tb/iq_mem_candidate.sv"], []),
+            ("selection_tree_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/issue_sched.sv", "tb/selection_tree.sv"], []),
+            ("prf_hierarchical_test", ["verilog/signal_fanout.sv", "verilog/prf.sv", "tb/prf_hierarchical.sv"], []),
             ("mul_div_test", ["verilog/mul_div.sv", "tb/mul_div.sv"], []),
+            ("dcache_test", ["scripts/ram/sram_fakeram.sv", "verilog/dcache.sv",
+                             "verilog/axi_bridge.sv", "tb/dcache.sv"], []),
+            ("lsu_generation", ["verilog/lsu.sv", "tb/lsu_generation.sv"], []),
+            ("lsu_disambiguation", ["verilog/lsu.sv", "tb/lsu_disambiguation.sv"], []),
         ]
         output = args.build.resolve()
         output.mkdir(parents=True, exist_ok=True)

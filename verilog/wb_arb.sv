@@ -1,5 +1,6 @@
 module wb_arb #(
     parameter integer PIPELINED = 0,
+    parameter integer FILTER_AFTER_SELECT = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -51,7 +52,7 @@ module wb_arb #(
         for (int i = 0; i < FU_SRC_COUNT; i = i + 1)
             discard[i] = source_valid[i] && squash_valid &&
                 ((source_payload[i][RESULT_BITS-1 -: TAG_BITS] - rob_head) > (squash_tag - rob_head));
-        source_ready = discard;
+        source_ready = (FILTER_AFTER_SELECT != 0) ? 0 : discard;
         selected = 0;
         selected_done_valid = 0;
         selected_done_tag = 0;
@@ -65,17 +66,19 @@ module wb_arb #(
                 // cursor and offset are each below FU_SRC_COUNT; one subtraction wraps.
                 candidate = int'(next_cursor) + offset;
                 if (candidate >= FU_SRC_COUNT) candidate = candidate - FU_SRC_COUNT;
-                if (chosen < 0 && source_valid[candidate] && !discard[candidate] && !selected[candidate])
+                if (chosen < 0 && source_valid[candidate] &&
+                    ((FILTER_AFTER_SELECT != 0) || !discard[candidate]) && !selected[candidate])
                     chosen = candidate;
             end
             if (chosen >= 0) begin
                 selected[chosen] = 1;
                 source_ready[chosen] = 1;
-                selected_done_valid[lane] = 1;
+                selected_done_valid[lane] = !discard[chosen];
                 selected_done_tag[lane*TAG_BITS +: TAG_BITS] = source_payload[chosen][RESULT_BITS-1 -: TAG_BITS];
                 selected_write_pdst[lane*PW +: PW] = source_payload[chosen][32 +: PW];
                 selected_write_value[lane*32 +: 32] = source_payload[chosen][31:0];
-                selected_write_valid[lane] = (source_payload[chosen][32 +: PW] != 0);
+                selected_write_valid[lane] = !discard[chosen] &&
+                    (source_payload[chosen][32 +: PW] != 0);
                 next_cursor = (chosen == FU_SRC_COUNT-1) ? 0 : CURSOR_BITS'(chosen + 1);
             end
         end

@@ -6,6 +6,7 @@ module iq_mem_candidate_test;
     logic [4:0] squash_tag = 0;
     logic [4:0] rob_head = 0;
     logic [1:0] disp_valid = 0;
+    wire [1:0] disp_prepare = disp_valid;
     logic [109:0] disp_uop = 0;
     logic [1:0] disp_src1_ready = 2'b11;
     logic [1:0] disp_src2_ready = 2'b11;

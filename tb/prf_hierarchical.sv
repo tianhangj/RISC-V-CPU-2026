@@ -1,5 +1,6 @@
 module prf_case #(
     parameter integer SIZE = 64,
+    parameter integer BYPASS = 0,
     parameter integer PW = $clog2(SIZE)
 ) (output logic done);
     logic clock = 0;
@@ -10,11 +11,16 @@ module prf_case #(
     logic [1:0] write_valid = 0;
     logic [2*PW-1:0] write_pdst = 0;
     logic [63:0] write_value = 0;
+    logic forward_only = 0;
+    logic [31:0] saved_nine;
     logic [31:0] expected [0:SIZE-1];
 
-    prf #(.ISSUE_WIDTH(2), .WB_WIDTH(2), .PRF_SIZE(SIZE)) dut (
+    prf #(.BYPASS_WRITE(BYPASS), .ISSUE_WIDTH(2), .WB_WIDTH(2), .PRF_SIZE(SIZE)) dut (
         .clock, .reset, .rd_addr, .rd_data,
-        .write_valid, .write_pdst, .write_value
+        .write_valid, .write_pdst, .write_value,
+        .forward_valid(forward_only ? 2'b01 : write_valid),
+        .forward_pdst(forward_only ? {PW'(0), PW'(9)} : write_pdst),
+        .forward_value(forward_only ? {32'd0, 32'h76543210} : write_value)
     );
 
     task automatic check_four(input integer first);
@@ -65,10 +71,25 @@ module prf_case #(
         for (integer index = 0; index < SIZE; index = index + 4)
             check_four(index);
 
+        // A completed producer can forward while it waits for a write port.
+        // Removing that producer must reveal the unchanged stored value.
+        forward_only = 1;
+        saved_nine = expected[9];
+        if (BYPASS) expected[9] = 32'h76543210;
+        check_four(8);
+        @(posedge clock);
+        #1;
+        check_four(8);
+        @(negedge clock);
+        forward_only = 0;
+        expected[9] = saved_nine;
+        check_four(8);
+
         write_valid = 2'b11;
         write_pdst[0 +: PW] = 8;
         write_pdst[PW +: PW] = 8;
         write_value = {32'hdeadbeef, 32'hcafebabe};
+        if (BYPASS) expected[8] = 32'hdeadbeef;
         check_four(7);
         @(posedge clock);
         #1;
@@ -79,6 +100,9 @@ module prf_case #(
         write_pdst[0 +: PW] = 0;
         write_pdst[PW +: PW] = SIZE - 1;
         write_value = {32'h89abcdef, 32'hffffffff};
+        if (BYPASS) expected[SIZE-1] = 32'h89abcdef;
+        check_four(0); // p0 must remain zero even during a matching write.
+        check_four(SIZE-2);
         @(posedge clock);
         #1;
         expected[SIZE-1] = 32'h89abcdef;
@@ -98,11 +122,13 @@ module prf_case #(
 endmodule
 
 module prf_hierarchical_test;
-    wire done64, done36;
+    wire done64, done36, bypass64, bypass36;
     prf_case #(.SIZE(64)) case64 (.done(done64));
     prf_case #(.SIZE(36)) case36 (.done(done36));
+    prf_case #(.SIZE(64), .BYPASS(1)) case_bypass64 (.done(bypass64));
+    prf_case #(.SIZE(36), .BYPASS(1)) case_bypass36 (.done(bypass36));
     initial begin
-        wait (done64 && done36);
+        wait (done64 && done36 && bypass64 && bypass36);
         $display("prf hierarchical PASS");
         $finish;
     end

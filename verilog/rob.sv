@@ -56,7 +56,8 @@ module rob #(
             slot = (head_q + lane) % ROB_DEPTH;
             if (!stop_retire && lane < keep_count) begin
                 if (alloc[slot][SIDW +: 2] == 2'd3) begin
-                    if (lane == 0 && store_responded[slot]) retire_count = retire_count + 1'b1;
+                    if (lane == 0 && (store_responded[slot] ||
+                        (store_started[slot] && st_done_valid))) retire_count = retire_count + 1'b1;
                     stop_retire = 1;
                 end else if (completed[slot]) begin
                     retire_count = retire_count + 1'b1;
@@ -74,6 +75,13 @@ module rob #(
             st_start_valid = 1;
             st_start_id = alloc[head_q][SIDW-1:0];
         end
+    end
+
+    for (genvar s = 0; s < ROB_DEPTH; s = s+1) begin : g_prepare_alloc
+        always_ff @(posedge clock)
+            for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane+1)
+                if (lane < rob_free && s == (int'(tail_q)+lane) % ROB_DEPTH)
+                    alloc[s] <= disp_rob[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
     end
 
     always_ff @(posedge clock) begin
@@ -98,7 +106,6 @@ module rob #(
             if (disp_fire && !squash_valid) begin
                 for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
                     if (lane < disp_count) begin
-                        alloc[(tail_q + lane) % ROB_DEPTH] <= disp_rob[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
                         completed[(tail_q + lane) % ROB_DEPTH] <= 0;
                         store_started[(tail_q + lane) % ROB_DEPTH] <= 0;
                         store_responded[(tail_q + lane) % ROB_DEPTH] <= 0;

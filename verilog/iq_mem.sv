@@ -1,4 +1,5 @@
 module iq_mem #(
+    parameter integer PIPELINED = 1,
     parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
     parameter integer LQ_DEPTH = 8, SQ_DEPTH = 8,
@@ -14,7 +15,7 @@ module iq_mem #(
     input logic clock, reset, squash_valid,
     input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
-    input logic [DISPATCH_WIDTH-1:0] disp_valid,
+    input logic [DISPATCH_WIDTH-1:0] disp_valid, disp_prepare,
     input logic [DISPATCH_WIDTH*MEM_IQ_BITS-1:0] disp_uop,
     input logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     input logic [WB_WIDTH-1:0] wake_valid,
@@ -34,13 +35,18 @@ module iq_mem #(
     iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
-        .BYPASS_WAKE(0), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
+        .BYPASS_WAKE(1), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
-        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(mem_iq_free),
         .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
         .cand_take(iq_cand_take));
 
+    generate if (PIPELINED == 0) begin : g_direct
+        assign cand_valid = iq_cand_valid;
+        assign cand_uop = iq_cand_uop;
+        assign iq_cand_take = cand_take;
+    end else begin : g_pipeline
     assign cand_valid = candidate_valid_q &&
         (!squash_valid || candidate_age <= (squash_tag - rob_head));
     assign cand_uop = candidate_reg;
@@ -56,4 +62,5 @@ module iq_mem #(
             if (iq_cand_take) candidate_reg <= iq_cand_uop;
         end
     end
+    end endgenerate
 endmodule

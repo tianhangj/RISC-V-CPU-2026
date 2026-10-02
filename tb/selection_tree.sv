@@ -21,7 +21,7 @@ module iq_tree_case #(
     iq_core #(.ISSUE_WIDTH(WIDTH), .DISPATCH_WIDTH(DEPTH), .WB_WIDTH(1),
         .DEPTH(DEPTH), .UOP_BITS(95), .SRC2_LSB(64), .RW(5), .PW(6)) dut (
         .clock, .reset, .squash_valid(1'b0), .squash_tag(5'd0), .rob_head,
-        .disp_valid, .disp_uop, .disp_src1_ready, .disp_src2_ready,
+        .disp_valid, .disp_prepare(disp_valid), .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid(1'b0), .wake_pdst(6'd0), .free_count,
         .cand_valid, .cand_uop, .cand_take
     );
@@ -139,8 +139,26 @@ module sched_tree_case (output logic done);
 
         squash_valid = 1;
         squash_tag = 5'd31;
-        check(2'b00, 1, {12'd0, 6'd6, 6'd5});
+        // Selection prepares data before recovery filtering. Only surviving
+        // selections may publish an execution-valid bit at the edge.
+        check(2'b01, 1, {6'd2, 6'd1, 6'd6, 6'd5});
+        @(posedge clock);
+        #1;
+        if (alu_exec_valid != 0 || mul_exec_valid || !mem_exec_valid ||
+            mem_exec_payload[106 -: 5] != 5'd31)
+            $fatal(1, "scheduler published a younger selection during squash");
+        alu_cand_valid = 0;
+        mem_cand_valid = 0;
+        @(negedge clock);
         squash_valid = 0;
+        mem_exec_ready = 1;
+        @(posedge clock);
+        #1;
+        if (alu_exec_valid != 0 || mul_exec_valid || mem_exec_valid)
+            $fatal(1, "canceled selection reappeared after squash");
+        @(negedge clock);
+        mem_exec_ready = 0;
+        alu_cand_valid = 2'b11;
         mem_cand_valid = 0;
         alu_cand_uop = {alu_item(5'd2, 6'd38, 6'd3, 6'd4, 32'd1),
                         alu_item(5'd31, 6'd20, 6'd1, 6'd2, 32'd0)};

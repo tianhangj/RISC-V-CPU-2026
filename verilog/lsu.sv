@@ -75,6 +75,7 @@ module lsu #(
     logic [GEN_WIDTH-1:0] offer_gen;
     logic write_active, write_sent;
     logic [SIDW-1:0] write_id;
+    wire [SIDW-1:0] active_write_id = write_active ? write_id : st_start_id;
     wire [TAG_BITS-1:0] exec_rob = exec_payload[MEM_EXEC_BITS-1 -: TAG_BITS];
     wire [2:0] exec_op = exec_payload[96+MIDW +: 3];
     wire [MIDW-1:0] exec_id = exec_payload[96 +: MIDW];
@@ -147,6 +148,7 @@ module lsu #(
                       ((byte_mask(sq_op[s], sq_addr[s][1:0]) &
                         byte_mask(lq_op[l], lq_addr[l][1:0])) != 0)))) load_blocked = 1;
             if (lq_valid[l] && lq_state[l] == 1 && !load_blocked &&
+                !(offer_valid && offer_id == LIDW'(l)) &&
                 (!squash_valid || (lq_rob[l]-rob_head) <= (squash_tag-rob_head)) &&
                 (chosen_load < 0 || (lq_rob[l]-rob_head) < best_age)) begin
                 chosen_load = l;
@@ -176,13 +178,15 @@ module lsu #(
     assign exec_ready = 1'b1;
     assign result_valid = result_busy;
     assign result_payload = result_q;
-    assign ld_req_valid = offer_valid && outstanding_q < LOAD_OUTSTANDING &&
-        (!squash_valid || (lq_rob[offer_id]-rob_head) <= (squash_tag-rob_head));
+    // Offers address RAM only. A read accepted on the squash edge is harmless:
+    // its original generation still identifies the later, discarded response.
+    // Keep recovery comparison out of the cache's synchronous RAM enable path.
+    assign ld_req_valid = offer_valid && outstanding_q < LOAD_OUTSTANDING;
     assign ld_req_payload = {offer_gen, offer_id, (lq_addr[offer_id] & 32'hfffffffc)};
     assign st_req_valid = write_active && !write_sent;
-    assign st_req_payload = {sq_addr[write_id] & 32'hfffffffc,
-        sq_data[write_id] << (8*sq_addr[write_id][1:0]),
-        byte_mask(sq_op[write_id], sq_addr[write_id][1:0])};
+    assign st_req_payload = {sq_addr[active_write_id] & 32'hfffffffc,
+        sq_data[active_write_id] << (8*sq_addr[active_write_id][1:0]),
+        byte_mask(sq_op[active_write_id], sq_addr[active_write_id][1:0])};
     assign st_done_valid = st_rsp_valid && write_active;
 
     always_ff @(posedge clock) begin
@@ -210,22 +214,22 @@ module lsu #(
             end
             if (offer_valid && squash_valid &&
                 (lq_rob[offer_id]-rob_head) > (squash_tag-rob_head)) offer_valid <= 0;
-            else if (req_fire) begin
-                offer_valid <= 0;
-                lq_state[offer_id] <= 2;
-            end else if (!offer_valid && chosen_load >= 0) begin
-                offer_valid <= 1;
-                offer_id <= chosen_load;
-                offer_gen <= current_gen;
-                lq_gen[chosen_load] <= current_gen;
+            else if (!offer_valid || req_fire) begin
+                offer_valid <= chosen_load >= 0;
+                if (chosen_load >= 0) begin
+                    offer_id <= chosen_load;
+                    offer_gen <= current_gen;
+                    lq_gen[chosen_load] <= current_gen;
+                end
             end
+            if (req_fire) lq_state[offer_id] <= 2;
             if (result_busy && (result_fire ||
                 (squash_valid &&
                  (result_q[RESULT_BITS-1 -: TAG_BITS]-rob_head) > (squash_tag-rob_head)))) begin
                 result_busy <= 0;
                 if (result_load && result_fire) lq_valid[result_load_id] <= 0;
             end
-            if (!result_busy && chosen_result >= 0) begin
+            if ((!result_busy || result_fire) && chosen_result >= 0) begin
                 result_busy <= 1;
                 if (result_is_store) begin
                     result_q <= {sq_rob[chosen_result], {PW{1'b0}}, 32'b0};

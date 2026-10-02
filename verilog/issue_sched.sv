@@ -63,23 +63,39 @@ module issue_sched #(
     integer free_slot;
     logic selected_mul;
     logic [ALU_IQ_BITS-1:0] selected_alu_item [0:ISSUE_WIDTH-1];
-    logic [MEM_IQ_BITS-1:0] seq_mem_item;
+    logic [ISSUE_WIDTH-1:0] take_survives;
+    localparam integer IQ_GROUPS = (ALU_IQ_BITS+15)/16;
+    wire [ISSUE_WIDTH*ISSUE_WIDTH*IQ_GROUPS-1:0] source_select;
+    for (genvar k = 0; k < ISSUE_WIDTH; k = k+1) begin : g_source_select
+        for (genvar s = 0; s < ISSUE_WIDTH; s = s+1) begin : g_source
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(IQ_GROUPS)) distribute(
+                take_alu_select[k][s], source_select[(k*ISSUE_WIDTH+s)*IQ_GROUPS +: IQ_GROUPS]);
+        end
+    end
+    always_comb begin
+        for (int k = 0; k < ISSUE_WIDTH; k = k+1) begin
+            selected_alu_item[k] = 0;
+            for (int s = 0; s < ISSUE_WIDTH; s = s+1)
+                for (int bit_no = 0; bit_no < ALU_IQ_BITS; bit_no = bit_no+1)
+                    selected_alu_item[k][bit_no] |= alu_cand_uop[s*ALU_IQ_BITS+bit_no] &
+                        source_select[(k*ISSUE_WIDTH+s)*IQ_GROUPS+bit_no/16];
+        end
+    end
 
     always_comb begin
         for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
             alu_age[s] = alu_cand_uop[s*ALU_IQ_BITS+ALU_IQ_BITS-1 -: RW] - rob_head;
             alu_is_mul[s] = (alu_cand_uop[s*ALU_IQ_BITS+64+3*PW +: 6] >= 38 &&
                              alu_cand_uop[s*ALU_IQ_BITS+64+3*PW +: 6] <= 45);
-            alu_survives[s] = alu_cand_valid[s] &&
-                (!squash_valid || alu_age[s] <= (squash_tag - rob_head));
+            alu_survives[s] = alu_cand_valid[s];
         end
         mem_age = mem_cand_uop[MEM_IQ_BITS-1 -: RW] - rob_head;
-        mem_survives = mem_cand_valid &&
-            (!squash_valid || mem_age <= (squash_tag - rob_head));
+        mem_survives = mem_cand_valid;
         alu_cand_take = 0;
         mem_cand_take = 0;
         rd_addr = 0;
-        slot_used = alu_busy;
+        // A consumed execution register can accept its successor at this edge.
+        slot_used = alu_busy & ~alu_exec_ready;
         mul_used_alu = 0;
         mem_used = 0;
         for (int k = 0; k < ISSUE_WIDTH; k = k + 1) begin
@@ -87,7 +103,6 @@ module issue_sched #(
             take_slot[k] = 0;
             take_alu_select[k] = 0;
             take_mem_select[k] = 0;
-            selected_alu_item[k] = 0;
             selected_mul = 0;
             free_slot = -1;
             for (int s = 0; s < ISSUE_WIDTH; s = s + 1)
@@ -99,11 +114,11 @@ module issue_sched #(
             end
             for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
                 tree_valid[k][TREE_LEAVES+s] = alu_survives[s] && !alu_cand_take[s] &&
-                    (alu_is_mul[s] ? (!mul_busy && !mul_used_alu) : (free_slot >= 0));
+                    (alu_is_mul[s] ? ((!mul_busy || mul_exec_ready) && !mul_used_alu) : (free_slot >= 0));
                 tree_age[k][TREE_LEAVES+s] = alu_age[s];
             end
             tree_valid[k][TREE_LEAVES+ISSUE_WIDTH] =
-                mem_survives && !mem_cand_take && !mem_busy && !mem_used;
+                mem_survives && !mem_cand_take && (!mem_busy || mem_exec_ready) && !mem_used;
             tree_age[k][TREE_LEAVES+ISSUE_WIDTH] = mem_age;
             for (int node = TREE_LEAVES-1; node > 0; node = node - 1) begin
                 if (tree_valid[k][2*node] &&
@@ -120,8 +135,6 @@ module issue_sched #(
             end
             for (int s = 0; s < ISSUE_WIDTH; s = s + 1) begin
                 take_alu_select[k][s] = tree_valid[k][1] && tree_src[k][1] == SRC_W'(s);
-                selected_alu_item[k] |= alu_cand_uop[s*ALU_IQ_BITS +: ALU_IQ_BITS] &
-                    {ALU_IQ_BITS{take_alu_select[k][s]}};
                 selected_mul |= take_alu_select[k][s] && alu_is_mul[s];
             end
             take_mem_select[k] = tree_valid[k][1] &&
@@ -144,6 +157,13 @@ module issue_sched #(
                 mem_used = 1;
             end
         end
+    end
+    always_comb begin
+        for (int k = 0; k < ISSUE_WIDTH; k = k+1)
+            take_survives[k] = !squash_valid ||
+                (((take_kind[k] == 3 ? mem_cand_uop[MEM_IQ_BITS-1 -: TAG_BITS] :
+                    selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS]) - rob_head)
+                    <= (squash_tag - rob_head));
     end
     for (genvar s = 0; s < ISSUE_WIDTH; s = s + 1) begin : g_alu_output
         wire [TAG_BITS-1:0] tag_q = alu_q[s][ALU_EXEC_BITS-1 -: TAG_BITS];
@@ -176,33 +196,63 @@ module issue_sched #(
             if (mem_busy && ((mem_exec_valid && mem_exec_ready) ||
                              (squash_valid && !mem_exec_valid))) mem_busy <= 0;
             for (int k = 0; k < ISSUE_WIDTH; k = k + 1) begin
-                if (take_kind[k] == 1 || take_kind[k] == 2) begin
+                if (take_survives[k] && (take_kind[k] == 1 || take_kind[k] == 2)) begin
                     if (take_kind[k] == 1) begin
                         alu_busy[take_slot[k]] <= 1;
-                        alu_q[take_slot[k]] <= {
-                            selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS+CIDW+6+PW],
-                            selected_alu_item[k][63:0],
-                            rd_data[(2*k)*32 +: 32],
-                            rd_data[(2*k+1)*32 +: 32]};
                     end else begin
                         mul_busy <= 1;
-                        mul_q <= {
-                            selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS],
-                            (selected_alu_item[k][64+3*PW +: 3] - 3'd6),
-                            selected_alu_item[k][64+2*PW +: PW],
-                            rd_data[(2*k)*32 +: 32],
-                            rd_data[(2*k+1)*32 +: 32]};
                     end
-                end else if (take_kind[k] == 3) begin
-                    seq_mem_item = mem_cand_uop;
+                end else if (take_survives[k] && take_kind[k] == 3) begin
                     mem_busy <= 1;
-                    mem_q <= {
-                        seq_mem_item[MEM_IQ_BITS-1 -: TAG_BITS+3+MIDW],
-                        rd_data[(2*k)*32 +: 32],
-                        seq_mem_item[31:0],
-                        rd_data[(2*k+1)*32 +: 32]};
                 end
             end
         end
+    end
+    // Prepare payloads independently of recovery. Only the narrow busy bits
+    // publish surviving selections; no live blocked execution slot is selected.
+    wire [ALU_EXEC_BITS-1:0] prepared_alu [0:ISSUE_WIDTH-1];
+    wire [MUL_EXEC_BITS-1:0] prepared_mul [0:ISSUE_WIDTH-1];
+    wire [MEM_EXEC_BITS-1:0] prepared_mem [0:ISSUE_WIDTH-1];
+    localparam integer ALU_GROUPS = (ALU_EXEC_BITS+15)/16;
+    localparam integer MUL_GROUPS = (MUL_EXEC_BITS+15)/16;
+    localparam integer MEM_GROUPS = (MEM_EXEC_BITS+15)/16;
+    wire [ISSUE_WIDTH*MUL_GROUPS-1:0] mul_enable;
+    wire [ISSUE_WIDTH*MEM_GROUPS-1:0] mem_enable;
+    for (genvar k = 0; k < ISSUE_WIDTH; k = k+1) begin : g_prepared
+        assign prepared_alu[k] = {selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS+CIDW+6+PW],
+            selected_alu_item[k][63:0], rd_data[(2*k)*32 +: 32], rd_data[(2*k+1)*32 +: 32]};
+        assign prepared_mul[k] = {selected_alu_item[k][ALU_IQ_BITS-1 -: TAG_BITS],
+            (selected_alu_item[k][64+3*PW +: 3] - 3'd6),
+            selected_alu_item[k][64+2*PW +: PW],
+            rd_data[(2*k)*32 +: 32], rd_data[(2*k+1)*32 +: 32]};
+        assign prepared_mem[k] = {mem_cand_uop[MEM_IQ_BITS-1 -: TAG_BITS+3+MIDW],
+            rd_data[(2*k)*32 +: 32], mem_cand_uop[31:0], rd_data[(2*k+1)*32 +: 32]};
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(MUL_GROUPS)) distribute_mul_enable(
+            take_kind[k] == 2, mul_enable[k*MUL_GROUPS +: MUL_GROUPS]);
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(MEM_GROUPS)) distribute_mem_enable(
+            take_kind[k] == 3, mem_enable[k*MEM_GROUPS +: MEM_GROUPS]);
+    end
+    for (genvar s = 0; s < ISSUE_WIDTH; s = s+1) begin : g_alu_storage
+        wire [ISSUE_WIDTH*ALU_GROUPS-1:0] payload_enable;
+        for (genvar k = 0; k < ISSUE_WIDTH; k = k+1) begin : g_lane
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(ALU_GROUPS)) distribute(
+                take_kind[k] == 1 && take_slot[k] == s,
+                payload_enable[k*ALU_GROUPS +: ALU_GROUPS]);
+        end
+        for (genvar bit_no = 0; bit_no < ALU_EXEC_BITS; bit_no = bit_no+1) begin : g_bit
+            always_ff @(posedge clock)
+                for (int k = 0; k < ISSUE_WIDTH; k = k+1)
+                    if (payload_enable[k*ALU_GROUPS+bit_no/16]) alu_q[s][bit_no] <= prepared_alu[k][bit_no];
+        end
+    end
+    for (genvar bit_no = 0; bit_no < MUL_EXEC_BITS; bit_no = bit_no+1) begin : g_mul_storage
+        always_ff @(posedge clock)
+            for (int k = 0; k < ISSUE_WIDTH; k = k+1)
+                if (mul_enable[k*MUL_GROUPS+bit_no/16]) mul_q[bit_no] <= prepared_mul[k][bit_no];
+    end
+    for (genvar bit_no = 0; bit_no < MEM_EXEC_BITS; bit_no = bit_no+1) begin : g_mem_storage
+        always_ff @(posedge clock)
+            for (int k = 0; k < ISSUE_WIDTH; k = k+1)
+                if (mem_enable[k*MEM_GROUPS+bit_no/16]) mem_q[bit_no] <= prepared_mem[k][bit_no];
     end
 endmodule

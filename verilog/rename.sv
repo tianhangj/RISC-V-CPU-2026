@@ -285,6 +285,56 @@ module rename #(
         end
     end
 
+    wire next_offer_valid = !reset && !squash_valid &&
+        ((offer_valid && !disp_ready) ||
+         (buf_valid && !offer_valid && proposed_count != 0));
+    wire next_buf_valid = !reset && !squash_valid &&
+        ((decode_valid && decode_ready) ||
+         (buf_valid && !(disp_valid && disp_ready &&
+                        (offer_front || offer_count == buf_count))));
+    wire [DCW-1:0] next_offer_count = !offer_valid ? proposed_count : offer_count;
+    wire [DCW-1:0] next_buf_count = (decode_valid && decode_ready) ? decode_count :
+        (disp_valid && disp_ready && !offer_front && offer_count != buf_count) ?
+        buf_count - offer_count : buf_count;
+    localparam integer LANE_OFFER_BITS = ROB_ALLOC_BITS + ALU_IQ_BITS + MEM_IQ_BITS +
+        MEM_ALLOC_BITS + CP_ALLOC_BITS + 5 + 3*PW + CIDW;
+    for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_lane_storage
+        wire [LANE_OFFER_BITS-1:0] lane_offer;
+        (* keep_hierarchy, keep *) rename_lane_storage #(
+            .D(DISPATCH_WIDTH), .LANE(lane), .CW(DCW),
+            .UOP_BITS(DECODE_BITS), .OFFER_BITS(LANE_OFFER_BITS)) storage (
+            .clock(clock), .next_offer_valid(next_offer_valid),
+            .next_buf_valid(next_buf_valid), .next_offer_count(next_offer_count),
+            .next_buf_count(next_buf_count), .disp_ready(disp_ready),
+            .decode_lane(decode_uop[lane*DECODE_BITS +: DECODE_BITS]),
+            .buffer_flat(buffer_flat), .buffer_lane(buffer_uop[lane]),
+            .proposed_lane({proposed_rob[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS],
+                proposed_alu[lane*ALU_IQ_BITS +: ALU_IQ_BITS],
+                proposed_mem[lane*MEM_IQ_BITS +: MEM_IQ_BITS],
+                proposed_lsq[lane*MEM_ALLOC_BITS +: MEM_ALLOC_BITS],
+                proposed_cp[lane*CP_ALLOC_BITS +: CP_ALLOC_BITS],
+                proposed_rd[lane], proposed_pdst[lane], proposed_ps1[lane],
+                proposed_ps2[lane], proposed_cp_id[lane]}), .offer_lane(lane_offer));
+        assign {offer_rob[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS],
+                offer_alu[lane*ALU_IQ_BITS +: ALU_IQ_BITS],
+                offer_mem[lane*MEM_IQ_BITS +: MEM_IQ_BITS],
+                offer_lsq[lane*MEM_ALLOC_BITS +: MEM_ALLOC_BITS],
+                offer_cp[lane*CP_ALLOC_BITS +: CP_ALLOC_BITS],
+                offer_rd[lane], offer_pdst[lane], offer_ps1[lane],
+                offer_ps2[lane], offer_cp_id[lane]} = lane_offer;
+    end
+
+    always_ff @(posedge clock) begin
+        // Data preparation does not need recovery/reset gating. Valid bits
+        // publish it later; a held offer must retain its payload unchanged.
+        if (!offer_valid) begin
+            offer_count <= proposed_count;
+            offer_branch <= proposed_branch;
+            offer_front <= proposed_front;
+            offer_front_pc <= proposed_front_pc;
+        end
+    end
+
     always_ff @(posedge clock) begin
         if (reset) begin
             buf_valid <= 0;
@@ -318,31 +368,12 @@ module rename #(
             end else begin
                 if (buf_valid && !offer_valid && proposed_count != 0) begin
                     offer_valid <= 1;
-                    offer_count <= proposed_count;
-                    offer_rob <= proposed_rob;
-                    offer_alu <= proposed_alu;
-                    offer_mem <= proposed_mem;
-                    offer_lsq <= proposed_lsq;
-                    offer_cp <= proposed_cp;
-                    offer_branch <= proposed_branch;
-                    offer_front <= proposed_front;
-                    offer_front_pc <= proposed_front_pc;
-                    for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
-                        offer_rd[lane] <= proposed_rd[lane];
-                        offer_pdst[lane] <= proposed_pdst[lane];
-                        offer_ps1[lane] <= proposed_ps1[lane];
-                        offer_ps2[lane] <= proposed_ps2[lane];
-                        offer_cp_id[lane] <= proposed_cp_id[lane];
-                    end
                 end
                 if (disp_valid && disp_ready) begin
                     offer_valid <= 0;
                     if (offer_front || offer_count == buf_count) buf_valid <= 0;
                     else begin
                         buf_count <= buf_count - offer_count;
-                        for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                            if (lane + offer_count < DISPATCH_WIDTH)
-                                buffer_uop[lane] <= buffer_uop[lane + offer_count];
                     end
                     for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1) begin
                         if (lane < offer_count) begin
@@ -364,8 +395,6 @@ module rename #(
                 if (decode_valid && decode_ready) begin
                     buf_valid <= 1;
                     buf_count <= decode_count;
-                    for (int lane = 0; lane < DISPATCH_WIDTH; lane = lane + 1)
-                        buffer_uop[lane] <= decode_uop[lane*DECODE_BITS +: DECODE_BITS];
                 end
             end
             for (int c = 0; c < CHECKPOINT_DEPTH; c = c + 1)
@@ -377,5 +406,36 @@ module rename #(
             for (int c = 0; c < CHECKPOINT_DEPTH; c = c + 1)
                 younger_alloc[c] <= young_work[c];
         end
+    end
+endmodule
+
+// Per-lane control registers distribute the load of payload enables. Keeping
+// this hierarchy prevents equivalent register copies from being merged.
+module rename_lane_storage #(
+    parameter integer D = 2, LANE = 0, CW = 2,
+    parameter integer UOP_BITS = 117, OFFER_BITS = 240
+) (
+    input wire clock, next_offer_valid, next_buf_valid, disp_ready,
+    input wire [CW-1:0] next_offer_count, next_buf_count,
+    input wire [UOP_BITS-1:0] decode_lane,
+    input wire [D*UOP_BITS-1:0] buffer_flat,
+    input wire [OFFER_BITS-1:0] proposed_lane,
+    output reg [UOP_BITS-1:0] buffer_lane,
+    output reg [OFFER_BITS-1:0] offer_lane
+);
+    reg offer_valid, buf_valid;
+    reg [CW-1:0] offer_count, buf_count;
+    always @(posedge clock) begin
+        offer_valid <= next_offer_valid;
+        buf_valid <= next_buf_valid;
+        offer_count <= next_offer_count;
+        buf_count <= next_buf_count;
+        if (!offer_valid) offer_lane <= proposed_lane;
+        if (!buf_valid || (offer_valid && offer_count == buf_count))
+            buffer_lane <= decode_lane;
+        else if (offer_valid && disp_ready)
+            for (integer source = LANE+1; source < D; source = source+1)
+                if (offer_count == CW'(source-LANE))
+                    buffer_lane <= buffer_flat[source*UOP_BITS +: UOP_BITS];
     end
 endmodule
