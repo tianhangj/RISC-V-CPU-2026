@@ -93,6 +93,16 @@ module fetch #(
                     packet = packet | {slot_pc[slot], slot_inst[slot], slot_npc[slot]};
                     status = status | state[slot];
                     taken = taken | slot_taken[slot];
+                    // Consume a matching head response at this edge instead
+                    // of waiting for its ready bit to make a round trip.
+                    for (int response_lane = 0; response_lane < DISPATCH_WIDTH;
+                         response_lane = response_lane+1)
+                        if (rsp_current && state[slot] == 2 && slot_gen[slot] == rsp_gen &&
+                            response_lane < rsp_count &&
+                            slot == (int'(rsp_id)+response_lane) % FETCH_QUEUE_DEPTH) begin
+                            packet[63:32] = ic_rsp_payload[response_lane*32 +: 32];
+                            status = 3;
+                        end
                 end
         end
         assign read_packet[lane] = packet;

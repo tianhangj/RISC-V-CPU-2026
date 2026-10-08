@@ -301,6 +301,41 @@ module rename #(
         buf_count - offer_count : buf_count;
     localparam integer LANE_OFFER_BITS = ROB_ALLOC_BITS + ALU_IQ_BITS + MEM_IQ_BITS +
         MEM_ALLOC_BITS + CP_ALLOC_BITS + 5 + 3*PW + CIDW;
+    generate if (DISPATCH_WIDTH == 1) begin : g_single_dispatch
+        // Rename the buffered instruction against the current RAT. Dispatch
+        // and replacement of this buffer can happen at the same edge, so the
+        // successor sees the updated mapping without a preparation bubble.
+        // A rejected offer is captured once and kept stable under backpressure.
+        logic held_valid;
+        logic [LANE_OFFER_BITS-1:0] held_lane;
+        logic held_branch, held_front;
+        logic [31:0] held_front_pc;
+        wire [LANE_OFFER_BITS-1:0] proposed_lane = {
+            proposed_rob, proposed_alu, proposed_mem, proposed_lsq, proposed_cp,
+            proposed_rd[0], proposed_pdst[0], proposed_ps1[0], proposed_ps2[0],
+            proposed_cp_id[0]};
+        wire [LANE_OFFER_BITS-1:0] selected_lane = held_valid ? held_lane : proposed_lane;
+        assign offer_valid = held_valid || (buf_valid && proposed_count != 0);
+        assign offer_count = DCW'(1);
+        assign offer_branch = held_valid ? held_branch : proposed_branch;
+        assign offer_front = held_valid ? held_front : proposed_front;
+        assign offer_front_pc = held_valid ? held_front_pc : proposed_front_pc;
+        assign {offer_rob, offer_alu, offer_mem, offer_lsq, offer_cp,
+            offer_rd[0], offer_pdst[0], offer_ps1[0], offer_ps2[0],
+            offer_cp_id[0]} = selected_lane;
+        always_ff @(posedge clock) begin
+            if (decode_valid && decode_ready) buffer_uop[0] <= decode_uop;
+            if (reset || squash_valid) held_valid <= 0;
+            else if (disp_valid && disp_ready) held_valid <= 0;
+            else if (!held_valid && offer_valid) begin
+                held_valid <= 1;
+                held_lane <= proposed_lane;
+                held_branch <= proposed_branch[0];
+                held_front <= proposed_front;
+                held_front_pc <= proposed_front_pc;
+            end
+        end
+    end else begin : g_multi_dispatch
     for (genvar lane = 0; lane < DISPATCH_WIDTH; lane = lane+1) begin : g_lane_storage
         wire [LANE_OFFER_BITS-1:0] lane_offer;
         (* keep_hierarchy, keep *) rename_lane_storage #(
@@ -337,11 +372,15 @@ module rename #(
             offer_front_pc <= proposed_front_pc;
         end
     end
+    always_ff @(posedge clock) begin
+        if (reset || squash_valid || (disp_valid && disp_ready)) offer_valid <= 0;
+        else if (buf_valid && !offer_valid && proposed_count != 0) offer_valid <= 1;
+    end
+    end endgenerate
 
     always_ff @(posedge clock) begin
         if (reset) begin
             buf_valid <= 0;
-            offer_valid <= 0;
             snapshot_valid <= 0;
             for (int r = 0; r < 32; r = r + 1) rat[r] <= r;
             for (int p = 0; p < PRF_SIZE; p = p + 1) begin
@@ -367,13 +406,8 @@ module rename #(
                 free_work = free_work | younger_alloc[restore_cp_id];
                 ready_work = ready_work & ~younger_alloc[restore_cp_id];
                 buf_valid <= 0;
-                offer_valid <= 0;
             end else begin
-                if (buf_valid && !offer_valid && proposed_count != 0) begin
-                    offer_valid <= 1;
-                end
                 if (disp_valid && disp_ready) begin
-                    offer_valid <= 0;
                     if (offer_front || offer_count == buf_count) buf_valid <= 0;
                     else begin
                         buf_count <= buf_count - offer_count;

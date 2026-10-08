@@ -1,4 +1,4 @@
-module branch_alu_test;
+module branch_alu_test #(parameter integer PIPELINED = 1);
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1;
@@ -10,7 +10,7 @@ module branch_alu_test;
     logic [146:0] exec_payload = 0;
     wire [42:0] result_payload;
     wire [104:0] resolve_payload;
-    alu dut (.*);
+    alu #(.PIPELINED(PIPELINED)) dut (.*);
     task automatic run(input [5:0] op, input [31:0] a, input [31:0] b,
                        input [31:0] imm, input logic taken, input [31:0] target);
         @(negedge clock);

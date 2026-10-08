@@ -1,8 +1,8 @@
 module student_top #(
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 4,
-    parameter integer WB_WIDTH = 2,
-    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ISSUE_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer WB_WIDTH = 1,
+    parameter integer COMMIT_WIDTH = 1,
     
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
@@ -16,7 +16,8 @@ module student_top #(
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer DCACHE_SIZE_BYTES = 16384,
-    parameter integer DCACHE_LINE_BYTES = 32,
+    parameter integer DCACHE_WAYS = 2,
+    parameter integer DCACHE_LINE_BYTES = 64,
     parameter integer BP_ENABLE = 1,
     parameter integer BTB_ENTRIES = 64,
     parameter integer BHT_ENTRIES = 256,
@@ -281,7 +282,7 @@ module student_top #(
         .clock, .reset, .rd_addr, .rd_data, .write_valid, .write_pdst, .write_value,
         .forward_valid(completion_valid), .forward_pdst(completion_pdst), .forward_value(completion_value));
     for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin : g_alu
-        alu #(.ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
+        alu #(.PIPELINED(ISSUE_WIDTH != 1), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
             .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_alu (
             .clock, .reset, .squash_valid(distributed_squash[(9+lane)*(RW+1)+RW]), .squash_tag(distributed_squash[(9+lane)*(RW+1) +: RW]), .rob_head(distributed_head[(7+lane)*RW +: RW]),
             .exec_valid(alu_exec_valid[lane]), .exec_ready(alu_exec_ready[lane]),
@@ -296,7 +297,7 @@ module student_top #(
         .exec_valid(mul_exec_valid), .exec_ready(mul_exec_ready), .exec_payload(mul_exec_payload),
         .result_valid(mul_result_valid), .result_ready(mul_result_ready),
         .result_payload(mul_result_payload));
-    lsu #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .ROB_DEPTH(ROB_DEPTH),
+    lsu #(.PIPELINED(ISSUE_WIDTH != 1), .DISPATCH_WIDTH(DISPATCH_WIDTH), .ROB_DEPTH(ROB_DEPTH),
         .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH),
         .LOAD_OUTSTANDING(LOAD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH)) u_lsu (
         .clock, .reset, .squash_valid(distributed_squash[(6)*(RW+1)+RW]), .squash_tag(distributed_squash[(6)*(RW+1) +: RW]), .rob_head(distributed_head[(5)*RW +: RW]), .current_gen,
@@ -315,7 +316,7 @@ module student_top #(
         .mul_result_valid, .mul_result_ready, .mul_result_payload,
         .lsu_result_valid, .lsu_result_ready, .lsu_result_payload,
         .done_valid, .done_tag, .write_valid, .write_pdst, .write_value);
-    dcache #(.SIZE_BYTES(DCACHE_SIZE_BYTES), .LINE_BYTES(DCACHE_LINE_BYTES),
+    dcache #(.SIZE_BYTES(DCACHE_SIZE_BYTES), .WAYS(DCACHE_WAYS), .LINE_BYTES(DCACHE_LINE_BYTES),
         .LQ_DEPTH(LQ_DEPTH), .GEN_WIDTH(GEN_WIDTH)) u_dcache (
         .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,

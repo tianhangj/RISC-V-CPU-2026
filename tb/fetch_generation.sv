@@ -42,10 +42,14 @@ module fetch_generation;
         ic_rsp_payload = {16'd1, 2'd0, 1'b1, 32'h12345678};
         @(posedge clock);
         @(negedge clock) ic_rsp_valid = 0;
-        repeat (3) @(posedge clock);
         if (!fetch_valid || fetch_packet[95:64] !== 32'h00000100 ||
             fetch_packet[63:32] !== 32'h12345678)
             $fatal(1, "new generation response missing");
+        repeat (3) begin
+            @(negedge clock);
+            if (!fetch_valid || fetch_packet[63:32] !== 32'h12345678)
+                $fatal(1, "forwarded response changed under backpressure");
+        end
         $display("PASS fetch generation filtering");
         $finish;
     end

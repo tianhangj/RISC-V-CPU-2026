@@ -30,6 +30,7 @@ def main():
             ("wb_late_filter_test", ["verilog/wb_arb.sv", "tb/wb_late_filter.sv"], []),
             ("rename_checkpoint_test", ["verilog/rename.sv", "tb/rename_checkpoint.sv"], []),
             ("rename_stream_test", ["verilog/rename.sv", "tb/rename_stream.sv"], []),
+            ("alu_forwarding_test", ["verilog/alu.sv", "tb/alu_forwarding.sv"], []),
             ("iq_alu_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "tb/iq_alu_candidate.sv"], []),
             ("iq_mem_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/iq_mem.sv", "tb/iq_mem_candidate.sv"], []),
             ("selection_tree_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/issue_sched.sv", "tb/selection_tree.sv"], []),
@@ -38,7 +39,12 @@ def main():
             ("dcache_test", ["scripts/ram/sram_fakeram.sv", "verilog/dcache.sv",
                              "verilog/axi_bridge.sv", "tb/dcache.sv"], []),
             ("lsu_generation", ["verilog/lsu.sv", "tb/lsu_generation.sv"], []),
+            ("lsu_generation", ["verilog/lsu.sv", "tb/lsu_generation.sv"], ["-GP=0"]),
+            ("lsu_pipeline_test", ["verilog/lsu.sv", "tb/lsu_pipeline.sv"], []),
+            ("lsu_pipeline_test", ["verilog/lsu.sv", "tb/lsu_pipeline.sv"], ["-GP=0"]),
+            ("store_pipeline_test", ["verilog/lsu.sv", "verilog/rob.sv", "tb/store_pipeline.sv"], []),
             ("lsu_disambiguation", ["verilog/lsu.sv", "tb/lsu_disambiguation.sv"], []),
+            ("lsu_disambiguation", ["verilog/lsu.sv", "tb/lsu_disambiguation.sv"], ["-GP=0"]),
         ]
         output = args.build.resolve()
         output.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,4 @@
-module lsu_generation;
+module lsu_generation #(parameter integer P = 1);
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1;
@@ -16,7 +16,7 @@ module lsu_generation;
     wire ld_req_valid, result_valid;
     wire [48:0] ld_req_payload;
     wire [40:0] result_payload;
-    lsu #(.DISPATCH_WIDTH(1), .ROB_DEPTH(8), .PRF_SIZE(36),
+    lsu #(.PIPELINED(P), .DISPATCH_WIDTH(1), .ROB_DEPTH(8), .PRF_SIZE(36),
         .LQ_DEPTH(2), .SQ_DEPTH(2), .LOAD_OUTSTANDING(2)) dut (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head(3'd0), .current_gen,
         .disp_valid, .disp_lsq, .lq_free(), .sq_free(), .lq_alloc_id(), .sq_alloc_id(),
@@ -30,6 +30,7 @@ module lsu_generation;
     task automatic allocate_load(input [5:0] pdst);
         begin
             @(negedge clock);
+            ld_req_ready = 0;
             disp_valid = 1;
             disp_lsq = {1'b0, 1'b0, 3'd1, pdst};
             @(posedge clock);
@@ -60,6 +61,7 @@ module lsu_generation;
         allocate_load(6'd33);
         wait (ld_req_valid);
         if (ld_req_payload[48:33] !== 16'd1) $fatal(1, "new request generation");
+        @(negedge clock) ld_req_ready = 1;
         @(posedge clock);
         @(negedge clock);
         ld_rsp_valid = 1;
@@ -75,7 +77,7 @@ module lsu_generation;
         repeat (2) @(posedge clock);
         if (!result_valid || result_payload !== {3'd1, 6'd33, 32'h12345678})
             $fatal(1, "new load response missing: %h", result_payload);
-        $display("PASS LSU generation filtering");
+        $display("PASS LSU P=%0d generation filtering", P);
         $finish;
     end
     initial begin

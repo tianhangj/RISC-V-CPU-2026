@@ -31,6 +31,7 @@ def main():
             ("branch_predictor_test", ["verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
             ("branch_ctrl_test", ["verilog/branch_ctrl.sv", "tb/branch_ctrl.sv"], []),
             ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], []),
+            ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], ["-GPIPELINED=0"]),
             ("wb_arb_test", ["verilog/wb_arb.sv", "tb/wb_arb.sv"], []),
             ("fetch_prediction_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "verilog/fetch.sv",
                                        "tb/fetch_prediction.sv"], []),

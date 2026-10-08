@@ -1,4 +1,5 @@
 module alu #(
+    parameter integer PIPELINED = 1,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -85,9 +86,14 @@ module alu #(
     end
 
     assign exec_ready = !occupied || result_ready;
-    assign result_valid = occupied;
-    assign result_payload = result_q;
-    assign resolve_valid = occupied && resolve_pending;
+    // The single-issue datapath can forward the current ALU result directly.
+    // Keep a skid register for WB stalls and keep resolution registered so
+    // recovery never feeds back through its own execution/result selection.
+    assign result_valid = occupied ||
+        (PIPELINED == 0 && exec_valid && !incoming_young);
+    assign result_payload = (PIPELINED == 0 && !occupied) ?
+        {in_rob, in_pdst, value} : result_q;
+    assign resolve_valid = resolve_pending && (PIPELINED == 0 || occupied);
     assign resolve_payload = resolve_q;
 
     always_ff @(posedge clock) begin
@@ -95,10 +101,10 @@ module alu #(
             occupied <= 0;
             resolve_pending <= 0;
         end else begin
-            if (occupied && resolve_pending) resolve_pending <= 0;
+            if (resolve_pending) resolve_pending <= 0;
             if (occupied && (result_ready || held_young)) occupied <= 0;
             if (exec_valid && exec_ready && !incoming_young) begin
-                occupied <= 1;
+                occupied <= PIPELINED != 0 || occupied || !result_ready;
                 result_q <= {in_rob, in_pdst, value};
                 resolve_q <= {in_rob, in_cp, in_pc, (in_op >= 5 && in_op <= 10),
                     taken, target, next_pc};

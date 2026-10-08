@@ -1,4 +1,4 @@
-module lsu_disambiguation;
+module lsu_disambiguation #(parameter integer P = 1);
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1;
@@ -8,7 +8,7 @@ module lsu_disambiguation;
     logic [102:0] exec_payload = 0;
     wire ld_req_valid;
     wire [48:0] ld_req_payload;
-    lsu #(.DISPATCH_WIDTH(2), .ROB_DEPTH(8), .PRF_SIZE(36),
+    lsu #(.PIPELINED(P), .DISPATCH_WIDTH(2), .ROB_DEPTH(8), .PRF_SIZE(36),
         .LQ_DEPTH(2), .SQ_DEPTH(2), .LOAD_OUTSTANDING(2)) dut (
         .clock, .reset, .squash_valid(1'b0), .squash_tag(3'b0),
         .rob_head(3'b0), .current_gen(16'b0), .disp_valid, .disp_lsq,
@@ -44,7 +44,7 @@ module lsu_disambiguation;
         repeat (2) @(posedge clock);
         if (!ld_req_valid || ld_req_payload[31:0] !== 32'h20)
             $fatal(1, "nonoverlapping load remained blocked");
-        $display("PASS LSU store disambiguation");
+        $display("PASS LSU P=%0d store disambiguation", P);
         $finish;
     end
 endmodule

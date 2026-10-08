@@ -1,4 +1,4 @@
-module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
+module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2)(output reg done);
     localparam integer IW = $clog2(LINE/4);
     localparam integer MB = 16+IW+32;
     reg clock = 0;
@@ -25,6 +25,11 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
     reg ar_stalled = 0, aw_stalled = 0, w_stalled = 0;
     reg [31:0] saved_ar, saved_aw, saved_w;
     reg [3:0] saved_mask;
+    reg check_assoc_flush = 0;
+    function automatic [31:0] assoc_value(input integer way);
+        assoc_value = way == 0 ? 32'hdeadbbef :
+            (SETS == 1 && way == 1) ? 32'h12345678 : 32'hcafe0000+32'(way);
+    endfunction
     wire rvalid = rc != 0 && cycles >= rdue[rh] && cycles%7 != 2;
     wire [31:0] rdata = memory[ra[rh] >> 2];
     wire bvalid = bc != 0 && cycles >= bdue[bh] && cycles%5 != 2;
@@ -32,7 +37,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
     assign arready = rc < 16 && cycles%5 != 1;
     assign awready = ac < 16 && cycles%4 != 1;
     assign wready = wc < 16 && cycles%6 != 3;
-    dcache #(.SIZE_BYTES(SETS*LINE), .LINE_BYTES(LINE)) dut (
+    dcache #(.SIZE_BYTES(SETS*WAYS*LINE), .WAYS(WAYS), .LINE_BYTES(LINE)) dut (
         .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,
         .st_req_payload, .st_rsp_valid,
@@ -51,7 +56,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         .bresp(2'b0), .bvalid, .bready);
     always @(posedge clock) if (!reset) begin
         cycles <= cycles+1;
-        if (cycles > 6000) $fatal(1, "dcache timeout LINE=%0d", LINE);
+        if (cycles > 6000) $fatal(1, "dcache timeout LINE=%0d WAYS=%0d", LINE, WAYS);
         if (ar_stalled && (!arvalid || araddr !== saved_ar)) $fatal(1, "AR changed while stalled");
         if (aw_stalled && (!awvalid || awaddr !== saved_aw)) $fatal(1, "AW changed while stalled");
         if (w_stalled && (!wvalid || wdata !== saved_w || wstrb !== saved_mask))
@@ -76,6 +81,10 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
                     $fatal(1, "MMIO preceded dirty data writeback");
                 if (SETS > 16 && memory[16*LINE/4] !== 32'h87654321)
                     $fatal(1, "MMIO lost a dirty line from another tag group");
+                if (check_assoc_flush)
+                    for (integer way = 0; way < WAYS; way = way+1)
+                        if (memory[way*SETS*LINE/4] !== assoc_value(way))
+                            $fatal(1, "MMIO lost dirty data from way %0d", way);
                 exits <= exits+1;
             end else begin
                 if (wa[ah] >= 65536 || wa[ah][1:0] != 0) $fatal(1, "bad writeback address");
@@ -100,6 +109,28 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         if (ld_rsp_payload !== {generation, id, expected})
             $fatal(1, "load LINE=%0d address=%h got=%h expected=%h", LINE, address, ld_rsp_payload, expected);
         @(posedge clock);
+    endtask
+    // Warm all conflicting lines, then switch ways on every consecutive hit.
+    task automatic assoc_hit_stream;
+        for (integer way = 0; way < WAYS; way = way+1) begin
+            load(32'(way*SETS*LINE), memory[way*SETS*LINE/4], 16'h6000, 0);
+            while (dut.state != 0) @(negedge clock);
+        end
+        reads_before = reads;
+        for (integer n = 0; n < 3*WAYS; n = n+1) begin
+            @(negedge clock);
+            ld_req_valid = 1;
+            ld_req_payload = {16'(16'h6100+n), 2'(n), 32'((n%WAYS)*SETS*LINE)};
+            if (!ld_req_ready) $fatal(1, "cross-way hit throughput bubble");
+            @(posedge clock); #1;
+            if (!ld_rsp_valid || ld_rsp_payload !==
+                {16'(16'h6100+n), 2'(n), memory[(n%WAYS)*SETS*LINE/4]})
+                $fatal(1, "cross-way hit data/identity corrupted WAYS=%0d", WAYS);
+        end
+        @(negedge clock) ld_req_valid = 0;
+        @(posedge clock); #1;
+        if (ld_rsp_valid || reads != reads_before)
+            $fatal(1, "coexisting cache ways refilled or duplicated a hit");
     endtask
     task automatic store(input [31:0] address, data, input [3:0] mask);
         @(negedge clock);
@@ -174,6 +205,20 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         load(0, 32'hdeadbbef, 16'h2222, 1);
         if (memory[0] === 32'hdeadbbef) $fatal(1, "write-back hit reached AXI early");
         load(SETS*LINE, 32'ha5000000+SETS*LINE, 16'h3333, 2);
+        while (dut.state != 0) @(negedge clock);
+        if (WAYS > 1) begin
+            if (memory[0] === 32'hdeadbbef || writes != 0)
+                $fatal(1, "unused way evicted a dirty resident line");
+            reads_before = reads;
+            load(0, 32'hdeadbbef, 16'h3334, 0);
+            load(SETS*LINE, 32'ha5000000+SETS*LINE, 16'h3335, 1);
+            if (reads != reads_before) $fatal(1, "two conflicting lines did not coexist");
+            // Fill the remaining ways, then wrap replacement to dirty way 0.
+            for (integer way = 2; way <= WAYS; way = way+1) begin
+                load(32'(way*SETS*LINE), 32'ha5000000+32'(way*SETS*LINE), 16'h3336, 2);
+                while (dut.state != 0) @(negedge clock);
+            end
+        end
         if (memory[0] !== 32'hdeadbbef || writes != LINE/4)
             $fatal(1, "dirty victim lost data");
         load(0, 32'hdeadbbef, 16'h4444, 2);
@@ -184,8 +229,13 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
             store(16*LINE, 32'h87654321, 15);
             load(16*LINE, 32'h87654321, 16'h8888, 0);
         end
+        // Dirty every way of one set; MMIO must drain all of them before AW/W.
+        for (integer way = 0; way < WAYS; way = way+1)
+            store(32'(way*SETS*LINE), assoc_value(way), 15);
+        check_assoc_flush = 1;
         store(32'h80000000, 42, 15);
         if (exits != 1 || bc != 0) $fatal(1, "MMIO completion before B response");
+        if (dut.dirty != 0) $fatal(1, "MMIO drain retained dirty metadata");
         // Reset invalidates metadata without relying on initialized SRAM.
         @(negedge clock) reset = 1;
         @(posedge clock);
@@ -195,17 +245,28 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4)(output reg done);
         while (dut.state != 0) @(negedge clock);
         if (reads != reads_before+LINE/4) $fatal(1, "reset retained valid cache entry");
         load_stream();
-        $display("PASS dcache LINE=%0d SETS=%0d", LINE, SETS);
+        assoc_hit_stream();
+        $display("PASS dcache LINE=%0d SETS=%0d WAYS=%0d", LINE, SETS, WAYS);
         done = 1;
     end
 endmodule
 module dcache_test;
-    wire [5:0] done;
-    dcache_case #(.LINE(16)) a(done[0]);
-    dcache_case #(.LINE(32)) b(done[1]);
-    dcache_case #(.LINE(64)) c(done[2]);
-    dcache_case #(.LINE(32), .SETS(1)) d(done[3]);
-    dcache_case #(.LINE(32), .SETS(32)) e(done[4]);
-    dcache_case #(.LINE(32), .SETS(512)) f(done[5]);
+    wire [15:0] done;
+    dcache_case #(.LINE(16), .WAYS(1)) a(done[0]);
+    dcache_case #(.LINE(32), .WAYS(1)) b(done[1]);
+    dcache_case #(.LINE(64), .WAYS(1)) c(done[2]);
+    dcache_case #(.LINE(32), .SETS(1), .WAYS(1)) d(done[3]);
+    dcache_case #(.LINE(32), .SETS(32), .WAYS(1)) e(done[4]);
+    dcache_case #(.LINE(32), .SETS(512), .WAYS(1)) f(done[5]);
+    dcache_case #(.LINE(16), .WAYS(2)) g(done[6]);
+    dcache_case #(.LINE(32), .WAYS(2)) h(done[7]);
+    dcache_case #(.LINE(64), .WAYS(2)) i(done[8]);
+    dcache_case #(.LINE(32), .SETS(1), .WAYS(2)) j(done[9]);
+    dcache_case #(.LINE(32), .SETS(32), .WAYS(2)) k(done[10]);
+    dcache_case #(.LINE(32), .SETS(256), .WAYS(2)) l(done[11]);
+    dcache_case #(.LINE(32), .WAYS(4)) m(done[12]);
+    dcache_case #(.LINE(32), .SETS(1), .WAYS(4)) n(done[13]);
+    dcache_case #(.LINE(32), .SETS(32), .WAYS(4)) o(done[14]);
+    dcache_case #(.LINE(32), .SETS(128), .WAYS(4)) p(done[15]);
     initial begin wait (&done); $finish; end
 endmodule

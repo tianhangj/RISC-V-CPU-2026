@@ -1,6 +1,6 @@
 # RV32IM 指令缓存乱序核接口规范
 
-版本：v1.8.1。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.8.4。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
@@ -27,10 +27,10 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 
 | 参数 | 默认 | 取值 |
 |---|---:|---|
-| ISSUE_WIDTH（I） | 2 | 1/2/4，全核每拍发射上限 |
-| DISPATCH_WIDTH（D） | 4 | 1/2/4 |
-| WB_WIDTH（W） | 2 | 1/2/4，每拍接受完成数 |
-| COMMIT_WIDTH（C） | 2 | 1/2/4 |
+| ISSUE_WIDTH（I） | 1 | 1/2/4，全核每拍发射上限 |
+| DISPATCH_WIDTH（D） | 1 | 1/2/4 |
+| WB_WIDTH（W） | 1 | 1/2/4，每拍接受完成数 |
+| COMMIT_WIDTH（C） | 1 | 1/2/4 |
 | ROB_DEPTH（R） | 32 | 2 的幂，至少 8，且不小于 I/D/W/C |
 | PRF_SIZE（P） | 64 | 至少 32+D |
 | IQ_ALU_DEPTH / IQ_MEM_DEPTH | 8 / 8 | 2 的幂，至少 D |
@@ -40,8 +40,9 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | ICACHE_SIZE_BYTES | 1024 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
 | ICACHE_WAYS | 2 | 1/2/4 |
 | ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
-| DCACHE_SIZE_BYTES | 16384 | 2 的幂，至少 DCACHE_LINE_BYTES |
-| DCACHE_LINE_BYTES | 32 | 16/32/64 字节；直接映射、write-back/write-allocate |
+| DCACHE_SIZE_BYTES | 16384 | 全部路的数据总容量，2 的幂，至少 DCACHE_WAYS × DCACHE_LINE_BYTES |
+| DCACHE_WAYS | 2 | 1/2/4；1 路为直接映射，2/4 路为组相联 |
+| DCACHE_LINE_BYTES | 64 | 16/32/64 字节；write-back/write-allocate |
 | BP_ENABLE | 1 | 0/1；关闭时顺序预测且停止训练 |
 | BTB_ENTRIES | 64 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
 | BHT_ENTRIES | 256 | 2 的幂，至少 2，独立 PC 字地址索引 |
@@ -54,6 +55,8 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 XLEN 固定 32，不作为参数。LSU 最多一个已授权 Store；AXI 桥允许多笔按序写回在途。参数满足上表是集成前提，不增加参数合法性检查。
 
 Cache 组数 `S=ICACHE_SIZE_BYTES/(ICACHE_WAYS*ICACHE_LINE_BYTES)` 为 2 的幂，允许 S=1；行字数 `L=ICACHE_LINE_BYTES/4`。`IF_ID_WIDTH=IDX(L)` 用于填充字编号，`DCW=CNT(D)` 用于包 count。
+
+DCache 组数 `DS=DCACHE_SIZE_BYTES/(DCACHE_WAYS*DCACHE_LINE_BYTES)` 同样为 2 的幂，允许 DS=1；总行数为 DS×DCACHE_WAYS。顶层默认 16 KiB、2 路、64 B 行，对应每路 128 组。独立 dcache 模块的 LINE_BYTES 默认仍为 32，由顶层显式传参。改变路数时总数据容量保持 DCACHE_SIZE_BYTES。
 
 定义 `IDX(N)=max(1,ceil(log2(N)))`、`CNT(N)=max(1,ceil(log2(N+1)))`。`RW=IDX(R)`、`PW=IDX(P)`、`LIDW=IDX(LQ_DEPTH)`、`SIDW=IDX(SQ_DEPTH)`、`FIDW=IDX(F)`、`MIDW=max(LIDW,SIDW)`、`CIDW=IDX(K)`、`TAG_BITS=RW`（ROB tag 仅含 rob_id/index，不再携带 generation）。
 
@@ -209,7 +212,7 @@ RAM 内槽形成 ic_req 保持型请求，id 为首槽编号，count 为 1..D；
 
 fetch_redirect 当拍取消未接受 offer 和旧输出，边沿清旧槽及当前路径 outstanding，设置目标 PC，并将 fetch_gen 更新为 payload.new_gen。generation 只由 branch_ctrl 产生。ICache 同拍取消旧等待包与旧命中响应，不再为取消的包返回事件；物理填充读数由 ICache/桥独立维护，不受 Fetch 清零影响。下一拍可创建新路径槽。复位 PC=RESET_PC、fetch_gen=0。
 
-最老连续就绪的至多 D 个槽形成 fetch_packet；在锁存的首个 pred_taken 槽处截断输出，避免合并跳转前后两个路径，即使预测目标恰好等于 PC+4 也截断。预测跳转仅推进 next_pc，不清前端状态、不增加 generation。剩余槽在下一输出包消费。valid 时 count 为 1..D，整包接受。输出缓冲可在旧包接受的边沿装入后续就绪包，无输出空拍；复制后不再引用源槽，背压期间 count 和载荷保持。Decode 纯组合转换，count 原样传递；Rename 缓冲已接收的包。
+最老连续就绪的至多 D 个槽形成 fetch_packet；在锁存的首个 pred_taken 槽处截断输出，避免合并跳转前后两个路径，即使预测目标恰好等于 PC+4 也截断。预测跳转仅推进 next_pc，不清前端状态、不增加 generation。剩余槽在下一输出包消费。valid 时 count 为 1..D，整包接受。当拍 ic_rsp 的 gen/id/count 匹配队头 waiting 槽及 slot_gen 时，直接将响应指令字参与就绪前缀并装入输出缓冲，省去等待 state=ready 的一拍；输出背压时响应仍写入队列，旧 generation 不参与旁路。输出缓冲可在旧包接受的边沿装入后续就绪包，无输出空拍；复制后不再引用源槽，背压期间 count 和载荷保持。Decode 纯组合转换，count 原样传递；Rename 缓冲已接收的包。
 
 ### 5.2 Instruction Cache
 
@@ -253,9 +256,9 @@ ROB 不输出可由尾索引推导的 D 份标签。LQ/SQ 完成顺序可以不�
 
 ### 6.2 派遣投影
 
-Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选取最大可容纳前缀，锁存 count、ROB 索引、物理目的、访存槽及 checkpoint 候选；未选后缀留在译码缓冲。每个控制流指令消耗一个 checkpoint。offer 只在 disp_valid&&disp_ready 时原子生效，背压期间内容不变。
+Rename 保留一个译码包缓冲和一个派遣 offer。根据全部容量选取最大可容纳前缀，准备 count、ROB 索引、物理目的、访存槽及 checkpoint 候选；未选后缀留在译码缓冲。D=2/4 锁存准备结果，D=1 仅在背压时锁存已发布 offer。每个控制流指令消耗一个 checkpoint。offer 只在 disp_valid&&disp_ready 时原子生效，背压期间内容不变。
 
-完整缓冲包派遣的同一边沿可以接收下一个译码包，下一拍使用更新后的 RAT 和空闲表生成新 offer；持续输入且资源充足时每两拍派遣一个包。派遣背压、仅派遣前缀、前端纠正或 squash 当拍不进行此替换，避免覆盖后缀或接受旧路径数据。
+完整缓冲包派遣的同一边沿可以接收下一个译码包。D=1 时，缓冲指令根据当前 RAT、空闲表和资源预览组合形成 offer；消费当前指令与接收下一条在同一边沿发生，下一拍看到更新后的 RAT，持续输入且资源充足时每拍派遣一条。首次背压时将 offer 的全部投影及分支/前端纠正信息锁存，之后保持到消费或 squash；背压期间资源预览变化不会改写已发布载荷。D=2/4 保留 offer 准备寄存器，持续输入时每两拍派遣一个包。派遣背压、仅派遣前缀、前端纠正或 squash 当拍不进行缓冲替换。
 
 | 投影 | 接收方 | 数据 |
 |---|---|---|
@@ -309,7 +312,7 @@ PRF 复位只需将 p1..p31 的初始架构值设零；p0 可直接用常量实�
 
 ### 8.1 执行单元
 
-ALU 使用一项结果缓冲，接收请求后最早下一拍 result_valid；满时背压。ALU 根据 op 使用寄存器值、PC 或 imm，计算 32 位结果。NOP 正常产生一次完成，pdst=0。
+ALU 新增 PIPELINED（模块默认 1）。PIPELINED=1 使用一项结果缓冲，接收请求后最早下一拍 result_valid。student_top 在 I=1 时使用 PIPELINED=0：结果缓冲为空时，当前执行入口的结果直接输出到完成/转发通路；写回背压时在接收请求边沿保存结果，之后载荷保持。缓冲满且本拍消费时可同时接收后继，但后继结果先进入缓冲，不能一拍产生两次完成。两种模式的分支解析均在请求接收边沿锁存并在下一拍发布，不依赖当拍 squash 或 WB ready；直通结果已消费也不丢失或重复解析。ALU 根据 op 使用寄存器值、PC 或 imm，计算 32 位结果。NOP 正常产生一次完成，pdst=0。
 
 分支实际下一 PC：条件成立为 PC+imm，否则 PC+4；JAL 为 PC+imm，JALR 为 (rs1+imm)&~1。JAL/JALR 的寄存器结果为 PC+4。实际下一 PC 仅进入独立 branch_resolve 通路，不通过普通完成包或 ROB 退休传递。整数结果截断为 32 位，移位量使用低 5 位，有符号比较和右移使用有符号解释。
 
@@ -325,7 +328,7 @@ ALU 使用一项结果缓冲，接收请求后最早下一拍 result_valid；满
 | 同上 REM | 0 |
 | 正常有符号除法 | 商向零截断，非零余数符号与被除数一致 |
 
-每个 ALU 在控制流结果首次产生时输出一次 `resolve_valid/resolve_payload:branch_resolve_t`，携带 tag、cp_id、分支 PC、is_conditional、实际 taken、target 和真实 npc；结果缓冲保留一次性解析待发位。事件不等待 result_ready，下一拍清除解析待发位，即使普通结果继续背压也不重复解析。候选取自已锁存的执行结果/有效位，不组合依赖本次 squash 或 WB ready。
+每个 ALU 在接收控制流请求后下一拍输出一次 `resolve_valid/resolve_payload:branch_resolve_t`，携带 tag、cp_id、分支 PC、is_conditional、实际 taken、target 和真实 npc；独立寄存器保留一次性解析待发位。事件不等待 result_ready，下一拍清除解析待发位，即使普通结果继续背压或已由直通路径消费也不重复解析。候选取自已锁存的解析载荷/有效位，不组合依赖本次 squash 或 WB ready。
 
 branch_ctrl 同时接收 I 条解析事件，以有效 checkpoint 的 cp_id/tag 匹配并比较 pred_npc。在多条误预测中选择按恢复前 rob_head 计算的最老者；该分支及更老解析均生效，更年轻解析被 squash。匹配正确的存活分支释放 checkpoint，所有存活解析同时产生训练事件；更年轻解析不训练。
 
@@ -347,19 +350,19 @@ wb_arb 接收 I 路 ALU、一条乘除和一条 LSU 结果，统一使用 result
 | write_valid[W]、write_pdst[W]、write_value[W] | PRF | 存活完成且 pdst!=0 时写入 |
 | write_valid[W]、write_pdst[W] 的分支线 | Rename、两 IQ 的 wake 端口 | 仅物理目的和有效位，不增加结果数据 |
 
-wb_arb 新增整数参数 `PIPELINED`（默认 0，取 0/1）。独立模块默认维持组合广播；student_top 当前使用 PIPELINED=0，当拍仲裁并广播；选择 PIPELINED=1 时，完整 `{tag,pdst,value}` 先锁存一拍，下一拍广播。该级每拍接收 W 个结果，不增加输出 ready；在输出时再次按当前 squash 年龄边界过滤，避免暂存的年轻结果越过恢复。cursor 仍在 FU 结果被接收时前进，ALU 解析事件仍独立于该流水级。完成和 PRF 写在同一广播接收边沿发生；顶层唤醒独立来自已锁存 FU 结果，可早于写回接收。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生 done 或真实 PRF 写；其原始唤醒只影响随后被取消的年轻依赖状态。
+wb_arb 新增整数参数 `PIPELINED`（默认 0，取 0/1）。独立模块默认维持组合广播；student_top 当前使用 PIPELINED=0，当拍仲裁并广播；选择 PIPELINED=1 时，完整 `{tag,pdst,value}` 先锁存一拍，下一拍广播。该级每拍接收 W 个结果，不增加输出 ready；在输出时再次按当前 squash 年龄边界过滤，避免暂存的年轻结果越过恢复。cursor 仍在 FU 结果被接收时前进，ALU 解析事件仍独立于该流水级。完成和 PRF 写在同一广播接收边沿发生；顶层唤醒独立来自当前 FU 结果，可早于写回接收。NOP、无链接分支或 Store 仍使用完成 lane，pdst=0 不影响 done。WB 不因发生恢复而整体关闭；触发分支及更老结果仍可当拍写入，更年轻结果不能产生 done 或真实 PRF 写；其原始唤醒只影响随后被取消的年轻依赖状态。
 
 ## 9. ROB 与退休
 
 ROB 每项保存 `rob_alloc_t`（其中含 old_pdst/kind/sq_id）、done 和 Store 授权/响应状态，不保存原指令、PC、预测值、实际目标、mispred 或 checkpoint 副本。头尾索引仍为 RW 位。ROB 不输出 generation 占用向量。
 
-非 Store 指令（含控制流、Load）每拍退休至多 C 条连续已完成前缀；遇到未完成项或 Store 停止，较老前缀先退休。控制流与其他非 Store 指令共用退休宽度，不截断前缀，也不再触发恢复；实际目标的解析事件在其首次结果可见时已处理。Store 仍在头部单独授权、等待写完成后单独退休。当拍完成最早下一拍退休；squash 当拍的退休前缀不得包含边界之后的年轻项。
+非 Store 指令（含控制流、Load）每拍退休至多 C 条连续已完成前缀；遇到未完成项或 Store 停止，较老前缀先退休。控制流与其他非 Store 指令共用退休宽度，不截断前缀，也不再触发恢复；实际目标的解析事件最迟在其退休边沿处理。Store 仍在头部单独授权、等待写完成后单独退休。当拍完成最早下一拍退休；squash 当拍的退休前缀不得包含边界之后的年轻项。
 
-Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 且头部 Store 已授权时 ROB 可在同一边沿退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
+Store 在头部且执行完成后产生一次 st_start_valid/st_start_id 事件；完成条件包括已记录的 completed 位以及本拍 WB 的匹配 done_tag/valid，允许授权与完成接收同拍。未被 WB 接收的 FU 结果不能授权写。LSU 的 SQ 已预留且上一个授权 Store 已完成，故无需 ready 或往返 ROB ID。收到 st_done_valid 且头部 Store 已授权时 ROB 可在同一边沿退休。更年轻分支解析时，头部 Store 可能正在等待 AW/W/B，这项授权和等待状态必须保留。
 
 ROB 只向 Rename 发出写寄存器退休 lane 的 reg_commit_valid/old_pdst，允许空洞；`old_pdst!=0` 即表示该项存在架构寄存器写。退休时 Rename 直接释放 old_pdst；LSU 不接退休广播。
 
-squash 边界 b 来自尚未退休的解析分支。按周期开始时 head 计算 keep_count=age(b)+1，令 tail=(b.index+1) mod R，清除其后年轻项。更老同拍退休 m 项仍生效：head 正常前移，count=keep_count-m；触发分支尚未在本拍完成状态中退休，不提前释放。所有有效的较老 done/Store 完成继续更新保留项。squash 当拍不接新派遣。ROB 不向 branch_ctrl 发退休恢复事件。
+squash 边界 b 来自尚未退休的解析分支。按周期开始时 head 计算 keep_count=age(b)+1，令 tail=(b.index+1) mod R，清除其后年轻项。保留前缀的同拍退休 m 项仍生效：head 正常前移，count=keep_count-m。ALU 结果直通时，触发分支可在上一边沿已写回，因此允许它与自身解析/恢复在同一边沿正常退休；年龄与保留边界仍按恢复前 head 计算。所有有效的较老 done/Store 完成继续更新保留项。squash 当拍不接新派遣。ROB 不向 branch_ctrl 发退休恢复事件。
 
 ROB 接收 done_valid/done_tag 时在本地匹配当前占用区间和 squash 边界，仅更新匹配且存活项的 done，不向 WB 返回组合筛选结果；不比较目的值。这样同一 ROB index 的存活指令正确完成。
 
@@ -380,13 +383,15 @@ load_bits    = read_data >> (8 * offset)
 
 size 为本地译码结果，不是流水接口字段。Load 按大小截取并符号/零扩展。RAM 门控只比较 effective_addr[31:28]==0；自然对齐访问不会跨越对齐字或 RAM 边界，无对齐检查或末字节范围加法器。
 
-恢复边沿允许暂存的 RAM Load 与 DCache 握手；squash 清除年轻槽后，旧响应按原 {gen,id} 过滤并只归还额度。尚未接受的年轻 offer 在恢复边沿取消。RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。LSU 从 branch_ctrl 接收 `current_gen`；形成新的 ld_req offer 时把当时的 `current_gen` 锁存在该 LQ 槽中。ld_req 为保持型通道，携带 `{gen,id}`，桥接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
+恢复边沿允许暂存的 RAM Load 与 DCache 握手；squash 清除年轻槽后，旧响应按原 {gen,id} 过滤并只归还额度。尚未接受的年轻 offer 在恢复边沿取消。RAM Load 扫描更老 SQ：旧 Store 地址未知或同字节重叠且未完成写时等待；地址不同或字节掩码不相交可发送。LSU 从 branch_ctrl 接收 `current_gen`；形成新的 ld_req offer 或空缓冲直通握手时，把当时的 `current_gen` 锁存在该 LQ 槽中，直通握手还在同一边沿设置等待响应状态。ld_req 为保持型通道，携带 `{gen,id}`，DCache 接收后计入读额度；ld_rsp 是无 ready 事件，每次事件均减少读额度。只有该 id 的 LQ 仍等待响应、`{gen,id}` 与该槽记录匹配且其 tag 不属于本拍 squash 范围时才存入数据；不匹配的响应只归还额度并丢弃。WB 背压不会占用桥内响应缓冲。
 
 非 RAM Load 不发请求，在其 LQ 产生零值并标记数据就绪，不占读额度，不等待 Store 消歧或外部响应。这使任意错误路径 Load 不访问 MMIO，也不会等待不存在的结果。
 
-LSU 只有一个 result_t 输出缓冲，为空或本拍被接收时可填入下一项；从数据就绪的 LQ 和地址/数据就绪的 SQ 中选最老且完成未发送的项；载荷从队列记录取 tag/pdst，Store 的 pdst=0。完成被 wb_arb 接收后，Load 立即释放 LQ；Store 标记执行完成已发送并继续保留 SQ。LQ 不必等退休，已返回的读事务不存在迟到响应。
+LSU 新增 PIPELINED 参数（独立模块默认 1，取 0/1）；student_top 在 I=1 时使用 0，其余使用 1。从数据就绪的 LQ、当拍身份/年龄匹配的 Load 响应、地址/数据就绪或本拍执行 AGU 的 SQ 中选最老且完成未发送的项。载荷从队列记录取 tag/pdst，Store 的 pdst=0；当拍响应按 LQ 的 op/offset 扩展数据。PIPELINED=1 使用一项寄存器结果缓冲，响应胜出时直接写该缓冲。PIPELINED=0 在结果缓冲为空时组合输出所选结果，WB 接收则不额外暂存，WB 背压则锁存并保持；缓冲满且本拍消费时，后继只能进入缓冲。未胜出或缓冲背压的响应仍保存到 LQ。完成被 wb_arb 接收后，Load 立即释放 LQ；Store 标记执行完成已发送并继续保留 SQ。LQ 不必等退休，已返回的读事务不存在迟到响应。
 
-SQ 接收头部 st_start_id 后建立仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。请求由 DCache 接收，RAM 命中的 st_rsp_valid 在 SRAM 更新边沿接收，缺失在完成填充与写分配后返回完成。LSU 向 ROB 发 st_done_valid 并释放 SQ，相关 Load 依赖解除。MMIO 地址由 DCache 先排空脏行，再透传 AW/W/B，等待自身 B 才完成。结果/Load offer 缓冲支持接收与补入同拍；已暂存的 Load 不会再次选中。
+RAM Load 的 AGU 同拍参与读请求选择，使用当前地址/op 检查旧 Store 依赖。PIPELINED=1 在同一边沿锁存地址与请求 offer，下一拍可握手；PIPELINED=0 在 offer 为空且读额度可用时直接发出选中 Load 的请求，Cache 背压或额度不足时在边沿锁存 offer，后续保持原地址/gen/id。已有 offer 本拍握手时允许同时补入下一项，已接受或已暂存的 Load 不会再次选择。两种模式都保留未知地址或重叠 Store 的阻塞、RAM 门控及 squash 年龄过滤，不进行 Store 转发或投机消歧。
+
+SQ 接收头部 st_start_id 的当拍即可发出仅含 addr/data/strb 的 st_req；同一时刻只有一个授权 Store。若授权与该 Store 的 AGU 同拍，使用当前 AGU 地址/data/op，否则使用 SQ 中的记录。请求及写完成等待状态在边沿锁存，背压期间保持，握手后不得重复发出。请求由 DCache 接收，RAM 命中的 st_rsp_valid 在 SRAM 更新边沿接收，缺失在完成填充与写分配后返回完成。LSU 向 ROB 发 st_done_valid 并释放 SQ，清除该写的 active/sent 状态，相关 Load 依赖解除。MMIO 地址由 DCache 先排空脏行，再透传 AW/W/B，等待自身 B 才完成。
 
 错误路径 Store 不会取得头部授权，任意地址仅保留在 SQ。正确路径合法退出 SW 也遵守相同授权及 AW/W/B 协议。LSU 不检查授权地址或标签的一致性，不为冗余核对传递副本。
 
@@ -474,10 +479,10 @@ cp_alloc_id[D] 给出最低编号的空闲 checkpoint。每个 offer 为各控�
 
 ```systemverilog
 module student_top #(
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer DISPATCH_WIDTH = 4,
-    parameter integer WB_WIDTH = 2,
-    parameter integer COMMIT_WIDTH = 2,
+    parameter integer ISSUE_WIDTH = 1,
+    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer WB_WIDTH = 1,
+    parameter integer COMMIT_WIDTH = 1,
 
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
@@ -491,7 +496,8 @@ module student_top #(
     parameter integer ICACHE_WAYS = 2,
     parameter integer ICACHE_LINE_BYTES = 32,
     parameter integer DCACHE_SIZE_BYTES = 16384,
-    parameter integer DCACHE_LINE_BYTES = 32,
+    parameter integer DCACHE_WAYS = 2,
+    parameter integer DCACHE_LINE_BYTES = 64,
     parameter integer BP_ENABLE = 1,
     parameter integer BTB_ENTRIES = 64,
     parameter integer BHT_ENTRIES = 256,
@@ -883,6 +889,7 @@ endmodule
 
 ```systemverilog
 module alu #(
+    parameter integer PIPELINED = 1,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -980,6 +987,7 @@ endmodule
 
 ```systemverilog
 module lsu #(
+    parameter integer PIPELINED = 1,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
@@ -1155,7 +1163,7 @@ endmodule
 - rob_head 接两 IQ、issue_sched、各 FU、LSU、branch_ctrl、wb_arb，作为年龄比较基准；ROB 尾索引和容量返回 Rename。IQ 内部槽号不传出。
 - issue_sched 的 ALU/MUL/MEM 执行投影分别接对应入口；每个入口保留完整身份用于局部取消。PRF 读口及窄 wake_* 连接保持。
 - 每个 ALU.resolve_* 接 branch_ctrl 的对应 lane，不经过 wb_arb。三个执行源类别的 result_t 接 wb_arb；顶层先仲裁，再按 squash 年龄边界过滤 done/write。
-- wb_arb.done_tag/valid 只接 ROB；write_* 只控制 PRF 写入。各 FU 的已锁存 result_valid/pdst 接 Rename 和两 IQ 的 wake_*，同时接 PRF 的 forward_*；控制流 npc 不进入完成转发。
+- wb_arb.done_tag/valid 只接 ROB；write_* 只控制 PRF 写入。各 FU 的 result_valid/pdst 接 Rename 和两 IQ 的 wake_*，同时接 PRF 的 forward_*；控制流 npc 不进入完成转发。
 - ROB.reg_commit_* 只接 Rename（仅携带 old_pdst）；st_start_* 接 LSU，st_done_valid 返回 ROB。LSU/DCache/桥的写请求和完成无 generation/ID，不受年轻分支恢复取消。
 - Fetch→ICache 使用带 count 的包请求/响应；ICache→桥的 IF 与 DCache→桥的 LD 请求和响应都传递 `{gen,id}`；桥保留并原样返回，客户端按 `{gen,id}` 匹配身份。旧事务与新事务可以同时在桥中存在；generation 只由 branch_ctrl 在每次实际重定向时自增。branch_ctrl.current_gen 直连 LSU；Fetch 只从 fetch_redirect_payload.new_gen 更新本地 fetch_gen。
 - 原 run/kill/restore、bridge_idle 和退休 recover_* 连接移除；也不再有 epoch 池相关端口。PRF 不接 squash，写入由 WB 筛选后的 write_valid 控制。外部 AXI 端口保持。
@@ -1197,15 +1205,17 @@ Fetch 对空闲尾部槽提前准备 PC、预测 npc、taken 和 generation，�
 
 ## 18. IPC 优化工作与 Data Cache 接口
 
-当前工作配置为 D=4、I=W=C=2、R=32、P=64、LQ=SQ=8、F=16。调度器、LSU 结果及请求缓冲支持消费与补入同拍；Rename/ROB/IQ 的空闲槽提前准备载荷，仅有效位发布派遣，不覆盖仍被使用的槽或背压 offer。
+当前工作配置为 D=I=W=C=1、R=32、P=64、LQ=SQ=8、F=16，DCache 默认 16 KiB/2 路/64 B 行。调度器、LSU 结果及请求缓冲支持消费与补入同拍；单发射 LSU 在空缓冲时直接发送请求/完成。Rename/ROB/IQ 的空闲槽提前准备载荷，仅有效位发布派遣，不覆盖仍被使用的槽或背压 offer。
 
-DCache 为直接映射、write-back/write-allocate，数据按行内字分为独立的单端口同步 sram_fakeram bank，tag 使用独立同步 sram_fakeram（DEPTH=组数，WIDTH=tag 位宽）；valid/dirty 使用寄存器，更新控制以 16 组为单位分发。接受 RAM 请求的边沿同步读取 tag 和整行数据，并锁存地址、Store 数据/strobe 或 Load 的 {gen,LQ id}。下一周期 PROBE 根据锁存地址的 valid 和 SRAM tag 判断命中，Load 命中当周期回复；该 Load 命中周期可同时接受下一条请求，连续 Load 命中仍为一条/拍。Store 命中在 PROBE 周期拉高 st_rsp_valid，接收完成事件的上升沿按 byte strobe 同步更新对应字 bank，期间背压下一条请求；完成事件不额外寄存一拍。miss 的 PROBE 周期背压，不会接受或覆盖下一条请求；脏 victim 的 tag/数据从该次同步读锁存。MMIO 排空时同步读取选定脏行的 tag/数据，再进入写回。
+DCache 为 WAYS 路组相联、write-back/write-allocate，顶层 DCACHE_WAYS 传给模块 WAYS，二者默认均为 2，支持 1/2/4。每路独立设置 tag SRAM 及按行内字分 bank 的单端口同步数据 SRAM；每个 SRAM 的 DEPTH=SIZE_BYTES/(WAYS×LINE_BYTES)，tag WIDTH=32-log2(LINE_BYTES)-log2(组数)。valid/dirty 使用逐路寄存器，按 `way×组数+set` 展平，更新控制以 16 行为单位分发。接受 RAM 请求的边沿并行读取所有路的 tag 和整行数据，并锁存地址、Store 数据/strobe 或 Load 的 {gen,LQ id}。下一周期 PROBE 比较所有路的 valid/tag 并选择命中路，Load 命中当周期回复；该 Load 命中周期可同时接受下一条请求，连续跨路 Load 命中仍为一条/拍。Store 命中在 PROBE 周期拉高 st_rsp_valid，接收完成事件的上升沿按 byte strobe 仅更新命中路的对应字 bank，期间背压下一条请求；完成事件不额外寄存一拍。miss 的 PROBE 周期背压，不会接受或覆盖下一条请求；victim 的路号、tag/数据从该次同步读锁存。MMIO 排空选择覆盖所有路的脏行，同步读取选定路/组的 tag/数据，再进入写回。
+
+每组替换先选最低编号无效路；所有路有效时使用该组的轮转指针。INSTALL 边沿将指针设为本次安装路的下一路，到 WAYS-1 后回绕为 0；命中不改变指针。victim_way 在 miss 开始时锁存，整次脏写回、填充及安装都使用同一路号，其他路的数据及元数据保持。
 
 一次 miss 占用控制器；脏 victim 逐字写回并等待全部 B，再从请求字开始环绕填充整行。Load 关键字返回时立即以原始 {gen,LQ id} 回复 LSU，其余字继续填充。INSTALL 边沿写入 tag SRAM 并设置 valid/dirty；Store miss 同边沿写入对应字。恢复不取消物理填充，不丢失已提交脏数据。复位清 valid/dirty/control，不清数据/tag SRAM。非 RAM Store 先排空全部脏行，再发送原始 MMIO 写，等待自身 B 完成。DCache 外部端口与载荷位布局不变。
 
 CPU ld_req/ld_rsp 为 GEN_WIDTH+LIDW+32 位；Cache 到桥的 mem_ld_req/mem_ld_rsp 为 GEN_WIDTH+WORD_W+32，id 表示行内字号。请求保持到 ready，响应无 ready、每笔只发一次。Cache 的 st_rsp 表示 RAM 更新或 MMIO 完成；桥的 mem_st_rsp 始终表示真实 B 握手。
 
-`make test-timing` 增加 tb/dcache.sv，以 SV2005 覆盖 16/32/64 B 行、单组和 512 组配置、关键字提前返回、连续命中切换字地址、跨命中/miss 的持续请求及返回身份、脏替换、byte 合并、复位、MMIO 排空，跨控制分组的脏写排空，以及深度 3 写队列的 AW/W 独立背压和回绕。还包含 LSU generation/Store 消歧测试：恢复边沿已接受的 RAM 读保持旧身份返回，清除的槽只归还额度；复用槽以新 generation 接收新响应。
+`make test-timing` 包含 tb/dcache.sv，以 SV2005 覆盖 1/2/4 路、16/32/64 B 行、单组、跨控制分组及默认 16 KiB 容量；检查关键字提前返回、连续跨路命中、跨命中/miss 的持续请求及返回身份、空路优先、同组冲突行共存、轮转脏替换、byte 合并、复位、MMIO 排空全部路的脏数据，以及深度 3 写队列的 AW/W 独立背压和回绕。还包含 LSU generation/Store 消歧测试：恢复边沿已接受的 RAM 读保持旧身份返回，清除的槽只归还额度；复用槽以新 generation 接收新响应。
 
 2026-10-02 上轮开发记录：组合候选/写回、PRF 写入旁路版本六项 make perf 的 IPC 几何平均为 0.6259，19 项 make test 全通过。随后按字分 bank、恢复边沿读请求身份过滤和队列排名分配版本的 IPC 为 0.6202。按字分 bank 版本 estimated_fmax_mhz=80.55、minimum_period_ns=12.4149、worst_setup_slack_ns=-9.0813（3.333 ns 目标），尚未达标。上轮暂停时，完成结果直接转发阶段的六项 IPC 为 0.6208，19 项 correctness 全通过；控制分发 RTL 的 3.333 ns 综合估计为 114.11 MHz，minimum_period_ns=8.7638、worst_setup_slack_ns=-5.4307，总面积 30221.24 μm²，报告输入 SHA-256 与当时源码一致。该结果未达到 300 MHz，不能以性能结果或 make synth 返回码宣称目标已完成。历史 ccb3088 的 411.98 MHz 使用了之后被撤销的映射设置，不证明当前频率达标；验收保持原 scripts/synth.py、ASAP7/OpenSTA 约束和全六项性能统计。本轮结果见第 18.3 节。
 
@@ -1214,6 +1224,7 @@ CPU ld_req/ld_rsp 为 GEN_WIDTH+LIDW+32 位；Cache 到桥的 mem_ld_req/mem_ld_
 ```systemverilog
 module dcache #(
     parameter integer SIZE_BYTES = 4096,
+    parameter integer WAYS = 2,
     parameter integer LINE_BYTES = 32,
     parameter integer LQ_DEPTH = 4,
     parameter integer GEN_WIDTH = 16,
@@ -1258,13 +1269,13 @@ Fetch 与 branch_predictor 的连续 PC 和顺序下一 PC 使用 pc_increment�
 
 Rename 的临时空闲表按译码 lane 提前选择非零目的寄存器，不依赖该 lane 的队列额度；遇到 fit 失败或前端修正后，后续 lane 不发布。实际 free_q/RAT 仍只在有效派遣握手时提交有效前缀，提前准备不会消耗后缀寄存器。used_alu/used_mem/used_lq/used_sq/used_cp 使用 CNT(D) 位，每包计数上界为 D。tb/rename_stream.sv 覆盖宽度 1/2/4 的零额度停顿、恢复单条额度、额度变化时保持已发布包，以及部分派遣后缀的寄存器编号与 RAW。
 
-顶层从 I 路 ALU、MULDIV 和 LSU 的已锁存完成结果产生 I+2 路唤醒和操作数转发，独立于 W 路写回端口。PRF 的 forward_valid/forward_pdst/forward_value 只覆盖组合读值，write_* 仍控制唯一真实写入；p0 始终为零，reset 时不转发。物理目的在活跃指令之间唯一，恢复边界后的年轻结果不会成为存活较老指令的源；恢复边沿取消年轻 FU/候选，之后物理寄存器才可重新分配。
+顶层从 I 路 ALU、MULDIV 和 LSU 的完成结果产生 I+2 路唤醒和操作数转发，独立于 W 路写回端口；I=1 时 ALU 与 LSU 在结果缓冲为空时使用当拍结果，其余使用已锁存结果。PRF 的 forward_valid/forward_pdst/forward_value 只覆盖组合读值，write_* 仍控制唯一真实写入；p0 始终为零，reset 时不转发。物理目的在活跃指令之间唯一，恢复边界后的年轻结果不会成为存活较老指令的源；恢复边沿取消年轻 FU/候选，之后物理寄存器才可重新分配。
 
 调度器按年龄选择和准备数据，恢复只在执行有效位发布处过滤年轻项。cand_take 可以消费被取消的年轻候选，不能使其在恢复后再次执行。FILTER_AFTER_SELECT=1 时写回仲裁先选择原始有效源，再过滤 done_valid/write_valid；源 ready 和指针不依赖 squash，未选择的年轻结果由所属 FU 在恢复边沿取消。默认 FILTER_AFTER_SELECT=0 保留先过滤再仲裁的行为。
 
 ### 18.3 2026-10-02 频率与面积优化测量
 
-保持本节默认配置及原综合流程，基线与本轮均使用 `CLOCK_PERIOD_NS=2.0`、相同 ASAP7 标准单元库、理想时钟和无布线寄生模型。基线为提交 18d8390，测量产物分别位于 `build/freq-area-baseline/synth/opt/` 和 `build/freq-area-control/synth/opt/`；本轮 report.json 的 21 个 RTL 输入 SHA-256 均与本轮源码一致。`make synth` 成功只表示综合与分析流程通过。
+该历史测量保持当时的默认配置及原综合流程，基线与本轮均使用 `CLOCK_PERIOD_NS=2.0`、相同 ASAP7 标准单元库、理想时钟和无布线寄生模型。基线为提交 18d8390，测量产物分别位于 `build/freq-area-baseline/synth/opt/` 和 `build/freq-area-control/synth/opt/`；本轮 report.json 的 21 个 RTL 输入 SHA-256 均与本轮源码一致。`make synth` 成功只表示综合与分析流程通过。
 
 | 指标 | 基线 | 本轮 | 变化 |
 | --- | ---: | ---: | ---: |
@@ -1277,3 +1288,65 @@ Rename 的临时空闲表按译码 lane 提前选择非零目的寄存器，不�
 同步 tag SRAM 减少寄存器和宽 tag 选择逻辑；Load 命中延迟和连续吞吐保持，干净 miss 需先经历 PROBE，多一拍 tag 查询。Store 命中在 PROBE 的 SRAM 写边沿完成，并背压下一请求；性能变化以上述完整六项测试为准。Fetch 的窄位宽计数、局部输出使能、预测控制分发和并行 PC 递增，以及 Rename 的空闲表提前准备，改善控制路径。全部改动使用 SystemVerilog 2005，综合约束及库未调整。147.1687 MHz 为综合估计，仍未达到 README-EN 的 300 MHz 门槛。
 
 本轮验证：`make synth`、六项 `make perf`、19 项 `make test MAX_CYCLES=100000000`（19 passed / 0 failed）、`make test-timing`、`make test-branch`、`make test-icache` 全部通过，完整软件回归容器退出码为 0。pc_increment 的 WORDS=0..4 全地址 SAT 等价证明通过。Docker 测试和综合逐项串行执行，编译 JOBS=2，测试容器限内存 4 GiB、综合容器限 5 GiB。软件回归日志为 `build/freq-area-control/software-validation.log`，定向回归日志为 `build/freq-area-control/directed-validation.log`，前后测量及输入哈希对照为 `build/freq-area-control/comparison.json`。SAT 可在同一 Docker 工具环境用 `yosys -p 'read_verilog -sv verilog/pc_increment.sv tb/pc_increment_equiv.sv; prep -top pc_increment_equiv -flatten; sat -verify -prove matched 1 -set-def-inputs'` 复现。
+
+### 18.4 2026-10-08 单发射 IPC 优化
+
+默认顶层改为 I=D=W=C=1；队列、Cache 和预测表容量保持第 2 节配置。比较基线也使用 I=D=W=C=1，仅保留优化前流水行为，避免将宽度切换算入 IPC 收益。未修改性能程序、指令计数或内存延迟。
+
+优化包括 D=1 连续 Rename 派遣、ALU 结果直通及背压缓冲、Fetch 当前响应旁路、LSU AGU 请求准备及匹配响应旁路。全核总发射仍每拍最多一条，写回及提交仍每拍最多一条；分支解析保留寄存器边界。
+
+| 程序 | 单发射基线周期 | 优化后周期 | 基线 IPC | 优化后 IPC | IPC 提升 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| perf_median | 21514 | 15109 | 0.3236 | 0.4607 | +42.39% |
+| perf_multiply | 49415 | 27715 | 0.4396 | 0.7838 | +78.30% |
+| perf_qsort | 386678 | 252398 | 0.3618 | 0.5543 | +53.20% |
+| perf_rsort | 414722 | 316564 | 0.4719 | 0.6183 | +31.01% |
+| perf_towers | 12474 | 9641 | 0.4231 | 0.5475 | +29.38% |
+| perf_vvadd | 10591 | 8491 | 0.4272 | 0.5328 | +24.73% |
+| 几何平均 | — | — | 0.4046 | 0.5749 | +42.07% |
+
+分阶段 IPC 几何平均：基线 0.4046，连续 Rename 0.5409，加入 LSU 旁路 0.5545，再加入 Fetch/ALU 旁路 0.5749。
+
+复现命令：`make perf APPIMAGE= BUILD=build/ipc-single-optimized MAX_CYCLES=100000000 JOBS=4`，LATENCY=10，Verilator 5.032，以 SystemVerilog 2005 编译。六项性能程序输出校验全部通过；对比、各阶段周期及最终源码 SHA-256 保存在 `build/ipc-single-comparison.json`，原始日志为 `build/ipc-single-{baseline,rename,lsu,optimized}.log`。
+
+另外仅运行改动相关定向测试：Rename 连续派遣/跨包 RAW/宽度 1、2、4/背压/单路 checkpoint 恢复；ALU 直通/背压替换/ROB 回绕/分支单次解析；Fetch generation、预测路径及 ICache 连续取指；LSU generation、旧 Store 消歧、响应扩展/背压/恢复。均通过。按本轮要求未运行综合，也未重跑完整 correctness 程序集；这些 IPC 结果不代表新配置的频率或面积。
+
+### 18.5 2026-10-08 DCache 路数参数化
+
+顶层增加 DCACHE_WAYS=2，传入 dcache.WAYS；支持 1/2/4 路。总数据容量为 16 KiB，默认每路 256 组、32 B 行；逐路 tag/数据 SRAM，空路优先及按组轮转替换，MMIO 排空全部路的脏行。Load 命中延迟与每拍一条的连续吞吐保持。接口及参数定义见第 2、13.1、18.1 节。
+
+| 性能程序 | 直接映射 IPC | 两路 IPC | IPC 变化 |
+| --- | ---: | ---: | ---: |
+| perf_median | 0.4607 | 0.4607 | +0.00% |
+| perf_multiply | 0.7838 | 0.7838 | +0.00% |
+| perf_qsort | 0.5543 | 0.5573 | +0.55% |
+| perf_rsort | 0.6183 | 0.6641 | +7.41% |
+| perf_towers | 0.5475 | 0.5475 | +0.00% |
+| perf_vvadd | 0.5328 | 0.5328 | +0.00% |
+| 几何平均 | 0.5749 | 0.5823 | +1.29% |
+
+六项性能程序输出校验全部通过。tb/dcache.sv 的 16 组配置全部通过，覆盖路数 1/2/4、16/32/64 B 行、单组、默认 16 KiB、冲突行共存、轮转脏替换、连续跨路命中、byte 合并、复位、MMIO 全路排空及 AXI 背压。
+
+复现 IPC：`make perf APPIMAGE= BUILD=build/ipc-dcache-two-way MAX_CYCLES=100000000 JOBS=4`。使用 Verilator 5.032、SystemVerilog 2005、LATENCY=10；直接映射基线复用上一轮优化后的仿真器，两次测量的其余 CPU 参数、程序与内存延迟相同。对比、周期及源码 SHA-256 保存在 `build/ipc-dcache-two-way/comparison.json`，定向日志为同目录 `directed-tests.log`。本轮按先前要求未运行综合。
+
+### 18.6 2026-10-08 单发射 IPC 超过 0.65
+
+目标按六项 perf_* 的 IPC 几何平均衡量。最终默认仍为 I=D=W=C=1、K=4、DCache 总容量 16 KiB/2 路，行大小改为 64 B，每路 128 组。性能程序、动态指令计数、LATENCY=10 和其余 CPU 参数保持不变。
+
+主要修改：Store AGU 同拍参与完成选择，ROB 接收队头 Store 的 WB 完成时即可授权，LSU 当拍发出授权写；单发射 LSU 空请求缓冲直通 Load 请求，空结果缓冲直通匹配响应，背压则保存并保持。Store 仍只在 ROB 头部授权，Load 仍等待未知或重叠的旧 Store，generation 和 squash 规则保持第 10 节定义。增大 Cache 行减少顺序数据访问的整行填充次数。
+
+| 性能程序 | 本轮基线周期 | 最终周期 | 基线 IPC | 最终 IPC | IPC 提升 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| perf_median | 15109 | 13282 | 0.4607 | 0.5241 | +13.76% |
+| perf_multiply | 27715 | 27314 | 0.7838 | 0.7953 | +1.47% |
+| perf_qsort | 251015 | 230134 | 0.5573 | 0.6079 | +9.07% |
+| perf_rsort | 294719 | 255547 | 0.6641 | 0.7659 | +15.33% |
+| perf_towers | 9641 | 8034 | 0.5475 | 0.6570 | +20.00% |
+| perf_vvadd | 8491 | 7326 | 0.5328 | 0.6175 | +15.90% |
+| 几何平均 | — | — | 0.5823 | **0.6547** | **+12.43%** |
+
+分阶段几何平均：本轮基线 0.5823，缩短 Store 路径 0.6078，LSU 结果直通 0.6205，64 B 行 0.6446，Load 请求直通 0.6547。最终默认配置重新编译测量，六项输出全部正确。
+
+新增 `tb/ipc_stats.sv` 和 `tb/ipc_profile.py`，只在仿真构建中绑定，统计取指空闲、候选缺失、派遣/提交、ROB/IQ/LSQ/checkpoint 阻塞、队头访存等待、Cache miss/背压、WB 冲突及逐 PC 分支错误。计数为周期条件统计，可能重叠；它们不改变原程序的 IPC 计数。复现命令：`python3 tb/ipc_profile.py --out build/ipc-065-final --appimage '' --jobs 4`；可用 `--case perf_qsort` 选择程序、`--parameter NAME=N` 对比顶层参数。周期、原始 stderr、分支统计及源码 SHA-256 在 `build/ipc-065-final/profile.json` 和各程序 `.stderr`，与本轮基线的对比在 `build/ipc-065-final/comparison.json`。
+
+定向测试通过：LSU PIPELINED=0/1 的 generation、槽复用/旧响应过滤、请求/结果直通、byte/halfword 扩展、WB 背压、squash 和旧 Store 消歧；Store AGU/ROB/Cache 请求同拍、写回背压禁止授权、Cache 背压保持、恢复保留授权写、后继 Store 与 SQ/ROB 回收。DCache 的 16 组路数/行大小/容量配置也通过。均使用 SystemVerilog 2005。按用户要求未运行综合；本节只报告 IPC，不报告新配置的频率或面积。

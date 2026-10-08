@@ -58,7 +58,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
             cycle = cycle + 1;
             if (disp_valid && disp_ready) begin
                 if (measure) begin
-                    if (last_dispatch >= 0 && cycle-last_dispatch != 2)
+                    if (last_dispatch >= 0 && cycle-last_dispatch != ((D == 1) ? 1 : 2))
                         $fatal(1, "D=%0d streaming dispatch took %0d cycles", D, cycle-last_dispatch);
                     last_dispatch = cycle;
                     for (integer lane = 0; lane < D; lane = lane+1) begin
@@ -151,6 +151,29 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
             tick();
             if (!dut.buf_valid || dut.buf_count != D-1)
                 $fatal(1, "D=%0d partial packet suffix lost", D);
+        end
+
+        // Streaming dispatch must snapshot a branch's destination before a
+        // consecutive younger overwrite, then reclaim only that younger map.
+        if (D == 1) begin
+            restart();
+            disp_ready = 1;
+            decode_valid = 1;
+            decode_uop[0 +: 117] =
+                {32'd0, 32'd4, 6'd3, 5'd0, 5'd0, 5'd1, 32'd4};
+            tick();
+            @(negedge clock) decode_uop[0 +: 117] = uop(32'd4, 32'd8);
+            tick();
+            if (dut.snapshot[0][1] != 32 || dut.rat[1] != 32)
+                $fatal(1, "streaming branch lost its destination snapshot");
+            @(negedge clock) decode_valid = 0;
+            tick();
+            if (dut.rat[1] != 33 || !dut.younger_alloc[0][33])
+                $fatal(1, "consecutive dispatch lost checkpoint allocation tracking");
+            @(negedge clock) squash_valid = 1;
+            tick();
+            if (dut.rat[1] != 32 || !dut.free_q[33] || dut.free_q[32])
+                $fatal(1, "streaming recovery lost branch map or kept younger map");
         end
 
         // Frontend correction and squash reject old-path input.

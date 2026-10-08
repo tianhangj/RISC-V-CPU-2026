@@ -37,6 +37,7 @@ module rob #(
     logic [ROB_CW-1:0] count_q;
     logic [ROB_CW-1:0] retire_count, keep_count;
     logic stop_retire;
+    logic head_completed;
     integer slot;
     function automatic [RW-1:0] age(input [RW-1:0] tag, input [RW-1:0] head);
         age = tag - head;
@@ -70,8 +71,12 @@ module rob #(
         end
         st_start_valid = 0;
         st_start_id = 0;
+        head_completed = completed[head_q];
+        for (int w = 0; w < WB_WIDTH; w = w + 1)
+            if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
+                head_completed = 1;
         if (count_q != 0 && alloc[head_q][SIDW +: 2] == 2'd3 &&
-            completed[head_q] && !store_started[head_q]) begin
+            head_completed && !store_started[head_q]) begin
             st_start_valid = 1;
             st_start_id = alloc[head_q][SIDW-1:0];
         end
