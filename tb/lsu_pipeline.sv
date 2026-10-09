@@ -98,6 +98,8 @@ module lsu_pipeline_test #(parameter integer P = 1);
         end
         if (result_valid) $fatal(1, "direct Load response duplicated");
 
+        // A squash-edge response must not survive even when WB cannot accept it.
+        @(negedge clock) result_ready = 0;
         load(5, 35, 2, 16, first_id);
         @(negedge clock);
         squash_valid = 1;

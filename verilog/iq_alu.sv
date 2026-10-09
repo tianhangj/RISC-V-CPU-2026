@@ -8,6 +8,8 @@ module iq_core #(
     parameter integer UOP_BITS = 95,
     parameter integer SRC2_LSB = 64,
     parameter integer BYPASS_WAKE = 0,
+    parameter integer EARLY_STORE = 0,
+    parameter integer STORE_OP_LSB = SRC2_LSB+2*PW,
     parameter integer RW = $clog2(ROB_DEPTH),
     parameter integer PW = $clog2(PRF_SIZE),
     parameter integer CW = $clog2(DEPTH + 1)
@@ -21,6 +23,7 @@ module iq_core #(
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [CW-1:0] free_count,
     output logic [ISSUE_WIDTH-1:0] cand_valid,
+    output logic [ISSUE_WIDTH-1:0] cand_src2_ready,
     output logic [ISSUE_WIDTH*UOP_BITS-1:0] cand_uop,
     input logic [ISSUE_WIDTH-1:0] cand_take
 );
@@ -37,7 +40,7 @@ module iq_core #(
     logic [CW-1:0] free_rank [0:DEPTH-1];
     logic [CW-1:0] lane_rank [0:DISPATCH_WIDTH-1];
     logic [DEPTH-1:0] cand_select [0:ISSUE_WIDTH-1];
-    logic [DEPTH-1:0] ready_candidate;
+    logic [DEPTH-1:0] ready_candidate, data_ready;
     localparam integer PAYLOAD_GROUPS = (UOP_BITS+15)/16;
     wire [ISSUE_WIDTH*DEPTH*PAYLOAD_GROUPS-1:0] candidate_mask;
     for (genvar lane = 0; lane < ISSUE_WIDTH; lane = lane+1) begin : g_candidate_fanout
@@ -73,14 +76,16 @@ module iq_core #(
                         select_ready2 = 1;
                 end
             end
-            ready_candidate[s] = valid_q[s] && select_ready1 && select_ready2;
+            data_ready[s]=select_ready2;
+            ready_candidate[s] = valid_q[s] && select_ready1 &&
+                (select_ready2 || (EARLY_STORE!=0 && entry[s][STORE_OP_LSB +: 3]>=5));
         end
         free_temp = 0;
         for (int s = 0; s < DEPTH; s = s + 1)
             if (!valid_q[s]) free_temp = free_temp + 1;
         free_count = CW'(free_temp);
         candidate_used = 0;
-        cand_valid = 0;
+        cand_valid = 0; cand_src2_ready=0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
             cand_select[lane] = 0;
             for (int leaf = 0; leaf < TREE_LEAVES; leaf = leaf + 1) begin
@@ -106,6 +111,7 @@ module iq_core #(
             cand_valid[lane] = tree_valid[lane][1];
             for (int s = 0; s < DEPTH; s = s + 1) begin
                 cand_select[lane][s] = tree_valid[lane][1] && tree_slot[lane][1] == SLOT_W'(s);
+                if (cand_select[lane][s]) cand_src2_ready[lane]=data_ready[s];
             end
             candidate_used |= cand_select[lane];
         end
@@ -232,7 +238,7 @@ module iq_alu #(
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(alu_iq_free),
-        .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
+        .cand_valid(iq_cand_valid), .cand_src2_ready(), .cand_uop(iq_cand_uop),
         .cand_take(iq_cand_take));
 
     generate if (PIPELINED == 0) begin : g_direct

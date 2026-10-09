@@ -1,4 +1,5 @@
 module alu_forwarding_test;
+    wire resolve_exec_valid=1'b0;
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1, squash_valid = 0, exec_valid = 0, result_ready = 1;

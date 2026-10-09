@@ -28,7 +28,7 @@ def main():
         verilator = verilator_command(args.verilator)
         tests = [
             ("pc_increment_test", ["verilog/pc_increment.sv", "tb/pc_increment.sv"], []),
-            ("branch_predictor_test", ["verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
+            ("branch_predictor_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
             ("branch_ctrl_test", ["verilog/branch_ctrl.sv", "tb/branch_ctrl.sv"], []),
             ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], []),
             ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], ["-GPIPELINED=0"]),

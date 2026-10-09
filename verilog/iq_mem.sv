@@ -1,5 +1,6 @@
 module iq_mem #(
     parameter integer PIPELINED = 1,
+    parameter integer EARLY_STORE = 0,
     parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
     parameter integer LQ_DEPTH = 8, SQ_DEPTH = 8,
@@ -22,10 +23,12 @@ module iq_mem #(
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [MIQ_CW-1:0] mem_iq_free,
     output logic cand_valid,
+    output logic cand_src2_ready,
     output logic [MEM_IQ_BITS-1:0] cand_uop,
     input logic cand_take
 );
-    logic iq_cand_valid, iq_cand_take;
+    logic iq_cand_valid, iq_cand_take, iq_cand_src2_ready;
+    reg candidate_src2_ready_q;
     logic [MEM_IQ_BITS-1:0] iq_cand_uop;
     logic candidate_valid_q;
     logic [MEM_IQ_BITS-1:0] candidate_reg;
@@ -35,18 +38,20 @@ module iq_mem #(
     iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
-        .BYPASS_WAKE(1), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
+        .BYPASS_WAKE(1), .EARLY_STORE(EARLY_STORE), .STORE_OP_LSB(32+2*PW+MIDW), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(mem_iq_free),
-        .cand_valid(iq_cand_valid), .cand_uop(iq_cand_uop),
+        .cand_valid(iq_cand_valid), .cand_src2_ready(iq_cand_src2_ready), .cand_uop(iq_cand_uop),
         .cand_take(iq_cand_take));
 
     generate if (PIPELINED == 0) begin : g_direct
+        assign cand_src2_ready=iq_cand_src2_ready;
         assign cand_valid = iq_cand_valid;
         assign cand_uop = iq_cand_uop;
         assign iq_cand_take = cand_take;
     end else begin : g_pipeline
+    assign cand_src2_ready=candidate_src2_ready_q;
     assign cand_valid = candidate_valid_q &&
         (!squash_valid || candidate_age <= (squash_tag - rob_head));
     assign cand_uop = candidate_reg;
@@ -59,7 +64,7 @@ module iq_mem #(
             candidate_valid_q <= 0;
         end else if (!candidate_valid_q || cand_take || !cand_valid) begin
             candidate_valid_q <= iq_cand_take;
-            if (iq_cand_take) candidate_reg <= iq_cand_uop;
+            if (iq_cand_take) begin candidate_reg <= iq_cand_uop; candidate_src2_ready_q<=iq_cand_src2_ready; end
         end
     end
     end endgenerate

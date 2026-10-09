@@ -18,8 +18,12 @@ module mul_div #(
     input logic result_ready,
     output logic [RESULT_BITS-1:0] result_payload
 );
-    localparam logic [1:0] IDLE = 2'd0, DIV = 2'd1, RESULT = 2'd2;
-    logic [1:0] state;
+    localparam logic [2:0] IDLE = 3'd0, DIV = 3'd1, RESULT = 3'd2, MUL_ADD = 3'd3, MUL_FINISH = 3'd4;
+    logic [2:0] state;
+    logic [31:0] pp00_q, pp01_q, pp10_q, pp11_q;
+    logic [63:0] product_q;
+    logic [31:0] correction_a_q, correction_b_q;
+    logic [2:0] mul_op_q;
     logic [TAG_BITS-1:0] tag_q;
     logic [PW-1:0] pdst_q;
     logic rem_q;
@@ -41,13 +45,11 @@ module mul_div #(
         (in_op[1] ? in_a : 32'hffffffff) : (in_op[1] ? 32'b0 : in_a);
     wire [31:0] in_abs_a = (in_signed_div && in_a[31]) ? -in_a : in_a;
     wire [31:0] in_abs_b = (in_signed_div && in_b[31]) ? -in_b : in_b;
-    // Correct the high half of the unsigned product for signed operands.
-    wire [63:0] in_product = in_a * in_b;
-    wire [31:0] in_product_high = in_product[63:32] -
-        (((in_op == 3'd1 || in_op == 3'd2) && in_a[31]) ? in_b : 32'b0) -
-        ((in_op == 3'd1 && in_b[31]) ? in_a : 32'b0);
-    wire [31:0] in_mul_value = (in_op == 3'd0) ?
-        in_product[31:0] : in_product_high;
+    // Registered 16x16 partial products, then accumulation, then correction.
+    wire [63:0] accumulated_product = {32'b0, pp00_q} +
+        {16'b0, pp01_q, 16'b0} + {16'b0, pp10_q, 16'b0} + {pp11_q, 32'b0};
+    wire [31:0] corrected_high = product_q[63:32] - correction_a_q - correction_b_q;
+    wire [31:0] mul_value = (mul_op_q == 0) ? product_q[31:0] : corrected_high;
     wire held_young = squash_valid &&
         ((tag_q - rob_head) > (squash_tag - rob_head));
     wire incoming_young = squash_valid &&
@@ -76,6 +78,8 @@ module mul_div #(
                 state <= IDLE;
             end else begin
                 case (state)
+                    MUL_ADD: begin product_q <= accumulated_product; state <= MUL_FINISH; end
+                    MUL_FINISH: begin result_q <= {tag_q, pdst_q, mul_value}; state <= RESULT; end
                     DIV: begin
                         if (div_step == 6'd31) begin
                             result_q <= {tag_q, pdst_q, div_value};
@@ -96,8 +100,14 @@ module mul_div #(
                 pdst_q <= in_pdst;
                 rem_q <= in_op[1];
                 if (in_op < 3'd4) begin
-                    result_q <= {in_tag, in_pdst, in_mul_value};
-                    state <= RESULT;
+                    pp00_q <= in_a[15:0] * in_b[15:0];
+                    pp01_q <= in_a[15:0] * in_b[31:16];
+                    pp10_q <= in_a[31:16] * in_b[15:0];
+                    pp11_q <= in_a[31:16] * in_b[31:16];
+                    correction_a_q <= ((in_op == 1 || in_op == 2) && in_a[31]) ? in_b : 0;
+                    correction_b_q <= (in_op == 1 && in_b[31]) ? in_a : 0;
+                    mul_op_q <= in_op;
+                    state <= MUL_ADD;
                 end else if (in_special) begin
                     result_q <= {in_tag, in_pdst, in_special_value};
                     state <= RESULT;

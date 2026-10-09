@@ -59,7 +59,7 @@ module rob #(
                 if (alloc[slot][SIDW +: 2] == 2'd3) begin
                     if (lane == 0 && (store_responded[slot] ||
                         (store_started[slot] && st_done_valid))) retire_count = retire_count + 1'b1;
-                    stop_retire = 1;
+                    else stop_retire = 1;
                 end else if (completed[slot]) begin
                     retire_count = retire_count + 1'b1;
                     if (alloc[slot][ROB_ALLOC_BITS-1 -: PW] != 0) begin
@@ -70,7 +70,7 @@ module rob #(
             end
         end
         st_start_valid = 0;
-        st_start_id = 0;
+        st_start_id = alloc[head_q][SIDW-1:0];
         head_completed = completed[head_q];
         for (int w = 0; w < WB_WIDTH; w = w + 1)
             if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
@@ -78,7 +78,6 @@ module rob #(
         if (count_q != 0 && alloc[head_q][SIDW +: 2] == 2'd3 &&
             head_completed && !store_started[head_q]) begin
             st_start_valid = 1;
-            st_start_id = alloc[head_q][SIDW-1:0];
         end
     end
 

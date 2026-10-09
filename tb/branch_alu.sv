@@ -1,4 +1,5 @@
 module branch_alu_test #(parameter integer PIPELINED = 1);
+    wire resolve_exec_valid=1'b0;
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1;

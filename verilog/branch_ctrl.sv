@@ -66,9 +66,11 @@ module branch_ctrl #(
     always_comb begin
         matched = 0;
         squash_valid = 0;
-        squash_tag = 0;
-        restore_cp_id = 0;
-        redirect_pc = 0;
+        // With one resolver, identity/target are previews. Preparing them before
+        // the misprediction decision avoids putting valid on the recovery data.
+        squash_tag = ISSUE_WIDTH==1 ? resolve_payload[RESOLVE_BITS-1 -: TAG_BITS] : 0;
+        restore_cp_id = ISSUE_WIDTH==1 ? resolve_payload[98 +: CIDW] : 0;
+        redirect_pc = ISSUE_WIDTH==1 ? resolve_payload[31:0] : 0;
         cp_release_mask = 0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
             resolve_cp[lane] = resolve_payload[lane*RESOLVE_BITS+98 +: CIDW];

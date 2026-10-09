@@ -45,21 +45,21 @@ module rename_checkpoint_test;
         @(negedge clock) reset = 0;
         offer(uop(6'd3, 5'd1), uop(6'd20, 5'd2));
         repeat (3) tick();
-        if (dut.snapshot_valid != 0 || cp_alloc_valid != 0 || dut.rat[1] != 1)
+        if (dut.g_legacy.snapshot_valid != 0 || cp_alloc_valid != 0 || dut.g_legacy.rat[1] != 1)
             $fatal(1, "preparing an image published speculative state before dispatch");
-        if (dut.snapshot[0][1] != 32 || dut.snapshot[0][2] != 2)
+        if (dut.g_legacy.snapshot[0][1] != 32 || dut.g_legacy.snapshot[0][2] != 2)
             $fatal(1, "held offer checkpoint has the wrong lane boundary");
         @(negedge clock) disp_ready = 1;
         tick();
-        if (!dut.snapshot_valid[0] || dut.rat[1] != 32 || dut.rat[2] != 33)
+        if (!dut.g_legacy.snapshot_valid[0] || dut.g_legacy.rat[1] != 32 || dut.g_legacy.rat[2] != 33)
             $fatal(1, "dispatch did not publish the prepared image");
         @(negedge clock);
         disp_ready = 0;
         squash_valid = 1;
         cp_release_mask = 4'b0001;
         tick();
-        if (dut.rat[1] != 32 || dut.rat[2] != 2 ||
-            !dut.free_q[33] || dut.free_q[32])
+        if (dut.g_legacy.rat[1] != 32 || dut.g_legacy.rat[2] != 2 ||
+            !dut.g_legacy.free_q[33] || dut.g_legacy.free_q[32])
             $fatal(1, "restore did not retain branch destination and reclaim younger destination");
         @(negedge clock);
         squash_valid = 0;
@@ -67,8 +67,8 @@ module rename_checkpoint_test;
         cp_alloc_id = 4'b1001;
         offer(uop(6'd3, 5'd3), uop(6'd3, 5'd4));
         tick();
-        if (dut.snapshot[1][3] != 33 || dut.snapshot[1][4] != 4 ||
-            dut.snapshot[2][3] != 33 || dut.snapshot[2][4] != 34)
+        if (dut.g_legacy.snapshot[1][3] != 33 || dut.g_legacy.snapshot[1][4] != 4 ||
+            dut.g_legacy.snapshot[2][3] != 33 || dut.g_legacy.snapshot[2][4] != 34)
             $fatal(1, "two branches did not get independent ordered images");
         @(negedge clock) disp_ready = 1;
         tick();
@@ -78,7 +78,7 @@ module rename_checkpoint_test;
         restore_cp_id = 1;
         cp_release_mask = 4'b0110;
         tick();
-        if (dut.rat[3] != 33 || dut.rat[4] != 4 || !dut.free_q[34])
+        if (dut.g_legacy.rat[3] != 33 || dut.g_legacy.rat[4] != 4 || !dut.g_legacy.free_q[34])
             $fatal(1, "first branch restore kept second branch destination");
         $display("rename checkpoint preparation PASS");
         $finish;

@@ -19,12 +19,13 @@ TESTCASES ?= $(FRAMEWORK_DIR)/testcases
 BUILD ?= build
 SYNTH_OUT ?= $(BUILD)/synth
 MODE ?= opt
-CLOCK_PERIOD_NS ?= 2.0
+CLOCK_PERIOD_NS ?= 3.333
 FILELIST ?= verilog/filelist.f
 PROGRAM ?= program.bin
 EXPECTED ?=
 Case ?=
-JOBS ?= 4
+JOBS ?= 1
+TIMING_ALL ?= 0
 MAX_CYCLES ?= 1000000
 BP_MAX_CYCLES ?= 100000000
 BP_WIDTH ?= 1
@@ -48,17 +49,18 @@ code:
 help:
 	@echo 'Host prerequisites: Python 3.10+, GNU Make, G++ (C++17), and binutils. No Docker required.'
 	@echo 'Configure APPIMAGE or native VERILATOR/YOSYS/ABC/STA/ASAP7_LIB in config.mk.'
-	@echo 'make build [FILELIST=verilog/filelist.f BUILD=build JOBS=4]'
+	@echo 'make build [FILELIST=verilog/filelist.f BUILD=build JOBS=1]'
 	@echo 'make run PROGRAM=program.bin EXPECTED=186 [WAVE=trace.vcd] [LOG=run.log]'
 	@echo 'make test [Case=correctness_add_to_100] [SIM=/path/to/prebuilt/sim]'
-	@echo 'make test-icache [BUILD=build JOBS=4]'
-	@echo 'make test-branch [BUILD=build JOBS=4]'
-	@echo 'make test-timing [BUILD=build JOBS=4]'
-	@echo 'make test-branch-accuracy [BUILD=build JOBS=4]'
+	@echo 'make test-icache [BUILD=build JOBS=1]'
+	@echo 'make test-branch [BUILD=build JOBS=1]'
+	@echo 'make test-timing [Case=single_issue_test TIMING_ALL=0 BUILD=build JOBS=1]'
+	@echo '  Default: short single-issue suite; TIMING_ALL=1 runs all directed tests, serially.'
+	@echo 'make test-branch-accuracy [BUILD=build JOBS=1]'
 	@echo 'make branch-accuracy [Case=perf_qsort BP_WIDTH=1 BP_ENABLE=1 BP_MAX_CYCLES=100000000]'
 	@echo '  CSV/JSON and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
-	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=2.0 FILELIST=verilog/filelist.f]'
+	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=3.333 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
 	@echo 'make clean  (removes BUILD, SYNTH_OUT and code)'
 	@echo 'make / make code: compile RTL and produce ./code for OJ'
@@ -93,7 +95,7 @@ test-branch:
 		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
 
 test-timing:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_timing.py" --build "$(BUILD)/timing-tests" --jobs $(JOBS) \
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_timing.py" --build "$(BUILD)/timing-tests" --jobs $(JOBS) $(if $(Case),--case "$(Case)",$(if $(filter 1,$(TIMING_ALL)),--all,)) \
 		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
 
 test-branch-accuracy:

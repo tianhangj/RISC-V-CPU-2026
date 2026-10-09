@@ -118,3 +118,43 @@ module decode #(
         assign decode_uop[lane*DECODE_BITS +: DECODE_BITS] = {pc, pred_npc, op, rs1, rs2, rd, imm};
     end
 endmodule
+
+// S3: two packets of storage at one registered ID/RN boundary.
+module decode_pipe #(
+    parameter integer DISPATCH_WIDTH=2,
+    parameter integer DCW=$clog2(DISPATCH_WIDTH+1),
+    parameter integer FETCH_BITS=96, DECODE_BITS=117
+) (
+    input wire clock, reset, fetch_redirect_valid,
+    input wire fetch_valid,
+    output wire fetch_ready,
+    input wire [DCW-1:0] fetch_count,
+    input wire [DISPATCH_WIDTH*FETCH_BITS-1:0] fetch_packet,
+    output wire decode_valid,
+    input wire decode_ready,
+    output wire [DCW-1:0] decode_count,
+    output wire [DISPATCH_WIDTH*DECODE_BITS-1:0] decode_uop
+);
+    wire [DISPATCH_WIDTH*DECODE_BITS-1:0] decoded;
+    reg [DISPATCH_WIDTH*DECODE_BITS-1:0] packets [0:1];
+    reg [DCW-1:0] counts [0:1];
+    reg head_q, tail_q;
+    reg [1:0] count_q;
+    wire push=fetch_valid && fetch_ready;
+    wire pop=decode_valid && decode_ready;
+    decode #(.DISPATCH_WIDTH(DISPATCH_WIDTH)) core (
+        .fetch_valid(1'b0), .fetch_ready(), .fetch_count, .fetch_packet,
+        .decode_valid(), .decode_ready(1'b0), .decode_count(), .decode_uop(decoded));
+    assign fetch_ready=!reset && !fetch_redirect_valid && count_q<2;
+    assign decode_valid=!reset && !fetch_redirect_valid && count_q!=0;
+    assign decode_count=counts[head_q];
+    assign decode_uop=packets[head_q];
+    always @(posedge clock) begin
+        if (reset || fetch_redirect_valid) begin head_q<=0; tail_q<=0; count_q<=0; end
+        else begin
+            count_q<=count_q+2'(push)-2'(pop);
+            if (push) begin packets[tail_q]<=decoded; counts[tail_q]<=fetch_count; tail_q<=~tail_q; end
+            if (pop) head_q<=~head_q;
+        end
+    end
+endmodule

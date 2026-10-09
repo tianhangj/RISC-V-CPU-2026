@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--case", action="append")
     parser.add_argument("--parameter", action="append", default=[], help="top-level NAME=integer override")
-    parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--latency", type=int, default=10)
     parser.add_argument("--max-cycles", type=int, default=100_000_000)
     parser.add_argument("--sim", type=Path, help="reuse an instrumented simulator")

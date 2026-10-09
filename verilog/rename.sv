@@ -1,4 +1,5 @@
 module rename #(
+    parameter integer DIRECT_RENAME = 0, CHECKPOINT_RAM = 0,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
@@ -65,6 +66,12 @@ module rename #(
     input logic [COMMIT_WIDTH-1:0] reg_commit_valid,
     input logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload
 );
+    generate if (DISPATCH_WIDTH == 1) begin : g_pipeline
+        single_rename #(.DIRECT_RENAME(DIRECT_RENAME), .CHECKPOINT_RAM(CHECKPOINT_RAM), .DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH),
+            .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
+            .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .IQ_MEM_DEPTH(IQ_MEM_DEPTH),
+            .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) core (.*);
+    end else begin : g_legacy
     logic [PW-1:0] rat [0:31];
     logic [PRF_SIZE-1:0] free_q, ready_q;
     logic [PW-1:0] snapshot [0:CHECKPOINT_DEPTH-1][0:31];
@@ -301,7 +308,7 @@ module rename #(
         buf_count - offer_count : buf_count;
     localparam integer LANE_OFFER_BITS = ROB_ALLOC_BITS + ALU_IQ_BITS + MEM_IQ_BITS +
         MEM_ALLOC_BITS + CP_ALLOC_BITS + 5 + 3*PW + CIDW;
-    generate if (DISPATCH_WIDTH == 1) begin : g_single_dispatch
+    if (DISPATCH_WIDTH == 1) begin : g_single_dispatch
         // Rename the buffered instruction against the current RAT. Dispatch
         // and replacement of this buffer can happen at the same edge, so the
         // successor sees the updated mapping without a preparation bubble.
@@ -376,7 +383,7 @@ module rename #(
         if (reset || squash_valid || (disp_valid && disp_ready)) offer_valid <= 0;
         else if (buf_valid && !offer_valid && proposed_count != 0) offer_valid <= 1;
     end
-    end endgenerate
+    end
 
     always_ff @(posedge clock) begin
         if (reset) begin
@@ -444,6 +451,7 @@ module rename #(
                 younger_alloc[c] <= young_work[c];
         end
     end
+    end endgenerate
 endmodule
 
 // Per-lane control registers distribute the load of payload enables. Keeping

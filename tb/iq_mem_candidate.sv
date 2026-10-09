@@ -1,4 +1,5 @@
 module iq_mem_candidate_test;
+    wire cand_src2_ready;
     logic clock = 0;
     always #5 clock = ~clock;
     logic reset = 1;

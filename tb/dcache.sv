@@ -1,4 +1,5 @@
-module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2)(output reg done);
+module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
+    CHECK_REFILL = 0)(output reg done);
     localparam integer IW = $clog2(LINE/4);
     localparam integer MB = 16+IW+32;
     reg clock = 0;
@@ -37,7 +38,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2)(output reg
     assign arready = rc < 16 && cycles%5 != 1;
     assign awready = ac < 16 && cycles%4 != 1;
     assign wready = wc < 16 && cycles%6 != 3;
-    dcache #(.SIZE_BYTES(SETS*WAYS*LINE), .WAYS(WAYS), .LINE_BYTES(LINE)) dut (
+    dcache #(.REFILL_HITS(CHECK_REFILL), .SIZE_BYTES(SETS*WAYS*LINE), .WAYS(WAYS), .LINE_BYTES(LINE)) dut (
         .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,
         .st_req_payload, .st_rsp_valid,
@@ -181,6 +182,16 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2)(output reg
         @(negedge clock) reset = 0;
         load(0, 32'ha5000000, 16'hffff, 0);
         if (dut.state != 4) $fatal(1, "critical load word waited for the entire line");
+        if (CHECK_REFILL != 0) begin
+            // An unrelated pending Store must not corrupt a refill Load's
+            // address or identity. The Store cannot handshake in REFILL.
+            st_req_valid = 1;
+            st_req_payload = {32'(LINE), 32'hdeadbeef, 4'hf};
+            load(0, 32'ha5000000, 16'h1234, 2);
+            if (dut.state != 4) $fatal(1, "refilled word waited for line installation");
+            st_req_valid = 0;
+            load(4, 32'ha5000004, 16'h5678, 1);
+        end
         while (dut.state != 0) @(negedge clock);
         if (reads != LINE/4) $fatal(1, "miss did not fill exactly one line");
         reads_before = reads;
@@ -249,6 +260,11 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2)(output reg
         $display("PASS dcache LINE=%0d SETS=%0d WAYS=%0d", LINE, SETS, WAYS);
         done = 1;
     end
+endmodule
+module dcache_stage2_test;
+    wire done;
+    dcache_case #(.LINE(64), .SETS(128), .WAYS(2), .CHECK_REFILL(1)) c(done);
+    initial begin wait (done); $finish; end
 endmodule
 module dcache_test;
     wire [15:0] done;

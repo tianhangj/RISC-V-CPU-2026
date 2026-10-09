@@ -16,10 +16,13 @@ branch_predictor.sv
 fetch.sv
 icache.sv
 dcache.sv
+data_prefetch.sv
 axi_bridge.sv
 iq_alu.sv
 iq_mem.sv
 issue_sched.sv
+single_issue.sv
 lsu.sv
+single_rename.sv
 rename.sv
 student_top.sv

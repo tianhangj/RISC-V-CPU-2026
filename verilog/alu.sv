@@ -1,5 +1,6 @@
 module alu #(
     parameter integer PIPELINED = 1,
+    parameter integer EARLY_RESOLVE = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -16,6 +17,7 @@ module alu #(
     input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
     input logic exec_valid,
+    input wire resolve_exec_valid,
     output logic exec_ready,
     input logic [ALU_EXEC_BITS-1:0] exec_payload,
     output logic result_valid,
@@ -41,48 +43,46 @@ module alu #(
     logic [31:0] value, next_pc, target;
     logic control_flow, taken;
 
+    wire immediate_op=in_op>=11 && in_op<=19;
+    wire [31:0] operand_b=immediate_op?in_imm:b;
+    wire is_left=in_op==17 || in_op==22;
+    wire is_arithmetic=in_op==19 || in_op==27;
+    wire [31:0] reversed_a;
+    for (genvar bit_no=0; bit_no<32; bit_no=bit_no+1)
+        assign reversed_a[bit_no]=a[31-bit_no];
+    wire [31:0] shift_input=is_left?reversed_a:a;
+    wire signed [32:0] shifted=$signed({is_arithmetic && a[31],shift_input}) >>> operand_b[4:0];
+    wire [31:0] shift_value;
+    for (genvar bit_no=0; bit_no<32; bit_no=bit_no+1)
+        assign shift_value[bit_no]=is_left?shifted[31-bit_no]:shifted[bit_no];
+    wire unsigned_less=a<operand_b;
+    wire signed_less=(a[31]!=operand_b[31])?a[31]:unsigned_less;
+    wire target_op=in_op>=2 && in_op<=10;
+    wire [31:0] add_a=(target_op && in_op!=4)?in_pc:a;
+    wire [31:0] add_b=target_op?in_imm:operand_b;
+    wire [31:0] add_value=add_a + (in_op==21?~add_b:add_b) + 32'(in_op==21);
     always_comb begin
-        value = 0;
-        next_pc = in_pc + 32'd4;
-        control_flow = 0;
-        taken = 0;
-        target = in_pc + in_imm;
+        value=0; next_pc=in_pc+32'd4; control_flow=0; taken=0;
+        target=(in_op==4)?(add_value & 32'hfffffffe):add_value;
         case (in_op)
-            1: value = in_imm;
-            2: value = in_pc + in_imm;
-            3: begin control_flow = 1; taken = 1; value = in_pc + 32'd4; end
-            4: begin
-                control_flow = 1; taken = 1; value = in_pc + 32'd4;
-                target = (a + in_imm) & 32'hfffffffe;
-            end
-            5: begin control_flow = 1; taken = (a == b); end
-            6: begin control_flow = 1; taken = (a != b); end
-            7: begin control_flow = 1; taken = ($signed(a) < $signed(b)); end
-            8: begin control_flow = 1; taken = ($signed(a) >= $signed(b)); end
-            9: begin control_flow = 1; taken = (a < b); end
-            10: begin control_flow = 1; taken = (a >= b); end
-            11: value = a + in_imm;
-            12: value = {31'b0, ($signed(a) < $signed(in_imm))};
-            13: value = {31'b0, (a < in_imm)};
-            14: value = a ^ in_imm;
-            15: value = a | in_imm;
-            16: value = a & in_imm;
-            17: value = a << in_imm[4:0];
-            18: value = a >> in_imm[4:0];
-            19: value = $signed(a) >>> in_imm[4:0];
-            20: value = a + b;
-            21: value = a - b;
-            22: value = a << b[4:0];
-            23: value = {31'b0, ($signed(a) < $signed(b))};
-            24: value = {31'b0, (a < b)};
-            25: value = a ^ b;
-            26: value = a >> b[4:0];
-            27: value = $signed(a) >>> b[4:0];
-            28: value = a | b;
-            29: value = a & b;
-            default: value = 0;
+            1: value=in_imm;
+            2,11,20,21: value=add_value;
+            3,4: begin control_flow=1; taken=1; value=in_pc+32'd4; end
+            5: begin control_flow=1; taken=a==b; end
+            6: begin control_flow=1; taken=a!=b; end
+            7: begin control_flow=1; taken=signed_less; end
+            8: begin control_flow=1; taken=!signed_less; end
+            9: begin control_flow=1; taken=unsigned_less; end
+            10: begin control_flow=1; taken=!unsigned_less; end
+            12,23: value={31'd0,signed_less};
+            13,24: value={31'd0,unsigned_less};
+            14,25: value=a^operand_b;
+            15,28: value=a|operand_b;
+            16,29: value=a&operand_b;
+            17,18,19,22,26,27: value=shift_value;
+            default: value=0;
         endcase
-        if (taken) next_pc = target;
+        if (taken) next_pc=target;
     end
 
     assign exec_ready = !occupied || result_ready;
@@ -93,8 +93,10 @@ module alu #(
         (PIPELINED == 0 && exec_valid && !incoming_young);
     assign result_payload = (PIPELINED == 0 && !occupied) ?
         {in_rob, in_pdst, value} : result_q;
-    assign resolve_valid = resolve_pending && (PIPELINED == 0 || occupied);
-    assign resolve_payload = resolve_q;
+    assign resolve_valid = EARLY_RESOLVE!=0 ? (resolve_exec_valid && control_flow && !reset) :
+        (resolve_pending && (PIPELINED == 0 || occupied));
+    assign resolve_payload = EARLY_RESOLVE!=0 ?
+        {in_rob, in_cp, in_pc, (in_op>=5 && in_op<=10), taken, target, next_pc} : resolve_q;
 
     always_ff @(posedge clock) begin
         if (reset) begin

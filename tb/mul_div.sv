@@ -63,7 +63,7 @@ module mul_div_test;
         reg [31:0] expected_value;
         begin
             expected_value = golden(op, a, b);
-            latency = (op < 4) ? 0 :
+            latency = (op < 4) ? 2 :
                 ((b == 0 || ((op == 4 || op == 6) &&
                  a == 32'h80000000 && b == 32'hffffffff)) ? 0 : 32);
             @(negedge clock);
@@ -144,6 +144,21 @@ module mul_div_test;
             if (result_valid) $fatal(1, "squashed divide reappeared");
         end
 
+        for (integer stage=0; stage<3; stage=stage+1) begin
+            @(negedge clock);
+            exec_valid=1;
+            exec_payload={5'd4,3'd2,6'd33,32'hf1234567,32'h98765432};
+            @(posedge clock); #1 exec_valid=0;
+            repeat (stage) begin @(posedge clock); #1; end
+            @(negedge clock) squash_valid=1;
+            @(posedge clock); #1;
+            if (result_valid || !exec_ready) $fatal(1,"squash did not cancel MUL stage %0d",stage);
+            @(negedge clock) squash_valid=0;
+            repeat (4) begin @(posedge clock); #1;
+                if (result_valid) $fatal(1,"cancelled multiply reappeared");
+            end
+        end
+
         // A result waiting for writeback is also cancelled when younger.
         @(negedge clock);
         exec_valid = 1;
@@ -163,6 +178,9 @@ module mul_div_test;
         exec_payload = {5'd1, 3'd1, 6'd34, 32'h80000000, 32'd2};
         @(posedge clock);
         #1 exec_valid = 0;
+        // Squash during accumulation keeps this older multiply alive.
+        @(negedge clock) squash_valid = 1;
+        repeat (2) begin @(posedge clock); #1; end
         expect_result(5'd1, 6'd34, 32'hffffffff);
         @(negedge clock) squash_valid = 1;
         @(posedge clock);
@@ -181,6 +199,7 @@ module mul_div_test;
         #1;
         result_ready = 0;
         exec_valid = 0;
+        repeat (2) begin @(posedge clock); #1; end
         expect_result(5'd2, 6'd36, 32'd42);
         @(negedge clock) result_ready = 1;
         @(posedge clock);

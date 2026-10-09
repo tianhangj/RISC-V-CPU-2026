@@ -61,7 +61,7 @@ bind student_top ipc_stats_monitor u_ipc_stats (
     .dispatch_count(disp_fire ? 32'(disp_count) : 32'd0),
     .any_candidate((|alu_cand_valid) || mem_cand_valid),
     .fetch_starved(!fetch_valid && decode_ready),
-    .rename_blocked(u_rename.buf_valid && !disp_valid),
+    .rename_blocked(decode_valid && !decode_ready),
     .rob_full(rob_free == 0), .alu_full(alu_iq_free == 0), .mem_full(mem_iq_free == 0),
     .cp_full(cp_free == 0), .lsq_full(lq_free == 0 || sq_free == 0),
     .head_store_wait(u_rob.count_q != 0 && u_rob.alloc[rob_head][SIDW +: 2] == 3 &&

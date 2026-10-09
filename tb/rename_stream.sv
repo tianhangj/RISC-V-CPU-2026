@@ -26,6 +26,24 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         .reg_commit_valid(1'b0), .reg_commit_payload(6'd0)
     );
 
+    wire pending, buffered;
+    wire [DCW-1:0] buffered_count;
+    wire [5:0] rat1, snapshot1;
+    wire free32, free33, younger33;
+    generate if (D==1) begin : g_observe
+        assign pending=dut.g_pipeline.core.offer_valid;
+        assign buffered=pending; assign buffered_count=1;
+        assign rat1=dut.g_pipeline.core.rat[1];
+        assign snapshot1=dut.g_pipeline.core.snapshot[0][1];
+        assign free32=dut.g_pipeline.core.free_q[32];
+        assign free33=dut.g_pipeline.core.free_q[33];
+        assign younger33=dut.g_pipeline.core.younger_alloc[0][33];
+    end else begin : g_observe
+        assign pending=dut.g_legacy.buf_valid || dut.g_legacy.offer_valid;
+        assign buffered=dut.g_legacy.buf_valid; assign buffered_count=dut.g_legacy.buf_count;
+        assign rat1=0; assign snapshot1=0; assign free32=0; assign free33=0; assign younger33=0;
+    end endgenerate
+
     function automatic [116:0] uop(input [31:0] pc, npc);
         // Every instruction reads and rewrites x1, including across packets.
         uop = {pc, npc, 6'd11, 5'd1, 5'd0, 5'd1, 32'd1};
@@ -125,7 +143,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         @(negedge clock) alu_iq_free = 0;
         repeat (2) begin
             tick();
-            if (!disp_valid || disp_alu !== held)
+            if ((D>1 && !disp_valid) || (D==1 && disp_valid) || disp_alu !== held)
                 $fatal(1, "D=%0d credit change overwrote a held offer", D);
         end
         @(negedge clock);
@@ -149,7 +167,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
             #1;
             if (disp_count != 1 || decode_ready) $fatal(1, "D=%0d partial packet overwritten", D);
             tick();
-            if (!dut.buf_valid || dut.buf_count != D-1)
+            if (!buffered || buffered_count != D-1)
                 $fatal(1, "D=%0d partial packet suffix lost", D);
         end
 
@@ -164,15 +182,15 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
             tick();
             @(negedge clock) decode_uop[0 +: 117] = uop(32'd4, 32'd8);
             tick();
-            if (dut.snapshot[0][1] != 32 || dut.rat[1] != 32)
+            if (snapshot1 != 32 || rat1 != 33)
                 $fatal(1, "streaming branch lost its destination snapshot");
             @(negedge clock) decode_valid = 0;
             tick();
-            if (dut.rat[1] != 33 || !dut.younger_alloc[0][33])
+            if (rat1 != 33 || !younger33)
                 $fatal(1, "consecutive dispatch lost checkpoint allocation tracking");
             @(negedge clock) squash_valid = 1;
             tick();
-            if (dut.rat[1] != 32 || !dut.free_q[33] || dut.free_q[32])
+            if (rat1 != 32 || !free33 || free32)
                 $fatal(1, "streaming recovery lost branch map or kept younger map");
         end
 
@@ -201,7 +219,7 @@ module rename_stream_case #(parameter integer D = 1)(output logic done);
         #1;
         if (decode_ready || disp_valid) $fatal(1, "D=%0d squash admitted old-path input", D);
         tick();
-        if (dut.buf_valid || dut.offer_valid) $fatal(1, "D=%0d squash kept frontend work", D);
+        if (pending) $fatal(1, "D=%0d squash kept frontend work", D);
         done = 1;
     end
 endmodule
