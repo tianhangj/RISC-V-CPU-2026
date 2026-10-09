@@ -1,6 +1,6 @@
 module predictor_case #(
     parameter integer WIDTH = 1,
-    parameter integer ENABLE = 1
+    parameter integer ENABLE = 1, RAM=0
 ) (output logic done);
     logic clock = 0;
     always #5 clock = ~clock;
@@ -11,7 +11,7 @@ module predictor_case #(
     logic [WIDTH-1:0] train_valid = 0;
     logic [WIDTH*66-1:0] train_payload = 0;
     branch_predictor #(.DISPATCH_WIDTH(WIDTH), .ISSUE_WIDTH(WIDTH),
-        .BTB_ENTRIES(4), .BHT_ENTRIES(8), .BP_ENABLE(ENABLE)) dut (.*);
+        .BTB_RAM(RAM), .BTB_ENTRIES(4), .BHT_ENTRIES(8), .BP_ENABLE(ENABLE)) dut (.*);
     task automatic check(input [31:0] pc, input logic taken, input [31:0] npc);
         lookup_pc = pc;
         #1;
@@ -104,12 +104,12 @@ module predictor_case #(
     end
 endmodule
 
-module branch_predictor_test;
+module branch_predictor_test #(parameter integer RAM=0);
     wire [3:0] done;
-    predictor_case #(.WIDTH(1)) c0(done[0]);
-    predictor_case #(.WIDTH(2)) c1(done[1]);
-    predictor_case #(.WIDTH(4)) c2(done[2]);
-    predictor_case #(.WIDTH(4), .ENABLE(0)) c3(done[3]);
+    predictor_case #(.RAM(RAM), .WIDTH(1)) c0(done[0]);
+    predictor_case #(.RAM(RAM), .WIDTH(2)) c1(done[1]);
+    predictor_case #(.RAM(RAM), .WIDTH(4)) c2(done[2]);
+    predictor_case #(.RAM(RAM), .WIDTH(4), .ENABLE(0)) c3(done[3]);
     initial begin
         wait (&done);
         $finish;

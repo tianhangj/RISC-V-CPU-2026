@@ -1,10 +1,10 @@
 # RV32IM 指令缓存乱序核接口规范
 
-版本：v1.10.0。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
+版本：v1.12.0。当前单发射优化以 Tier 2 面积 ≤18,000 µm²、六项 IPC 几何平均 ≥0.8 为目标（本轮放宽的 IPC 门槛）；按本轮要求将频率目标设为 ≥200 MHz，`make synth` 默认周期为 5.0 ns。第 17–20 节保留历史测量与配置，当前实现差异以第 21 节为准。本文定义成员 A、B 的实现接口；与 `plan.md` 冲突时以本文为准。外部接口遵守 [README](README-ZH.md) 和 [AXI 规范](docs/axi4-lite.md)。
 
 ## 1. 架构与实现边界
 
-- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction/Data Cache；带 BTB + 2-bit BHT；无 Store 转发或投机访存消歧；使用分支 checkpoint 和 16-bit generation。
+- RV32IM、乱序发射、按序提交、物理寄存器重命名；带 Instruction/Data Cache；带 BTB + 2-bit BHT；支持保守 Store-to-Load 转发，不投机越过未知 Store 地址；使用分支 checkpoint 和 16-bit generation。
 - 默认启用全控制流预测；BTB 未命中时预测 PC+4，命中后条件分支使用 BHT 方向，JAL/JALR 使用 BTB 目标。一个取指包内按 PC+4 连续递增，并在首个预测 taken 处截断。分支执行产生真实下一 PC 时纠正误预测，不等待退休或 WB 仲裁。
 - 正确路径指令受支持且访问合法；所有路径地址按访问宽度自然对齐。正确路径取指、Load 访问 RAM，Store 访问 RAM 或执行合法退出写。运行期间指令内存保持不变，不支持自修改代码或 Store 引起的 ICache 失效。无 CSR、特权陷入或精确异常状态。
 - Store 仅在 ROB 头部获得外部写授权。RAM Load 可越过地址已知且字节范围不重叠的旧 Store；非 RAM Load 在本地返回零。
@@ -33,8 +33,8 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | COMMIT_WIDTH（C） | 2 | 1/2/4 |
 | ROB_DEPTH（R） | 32 | 2 的幂，至少 8，且不小于 I/D/W/C |
 | PRF_SIZE（P） | 48 | 至少 32+D |
-| IQ_ALU_DEPTH / IQ_MEM_DEPTH | 4 / 4 | 正整数，至少 D；选择树补齐到 2 的幂 |
-| LQ_DEPTH / SQ_DEPTH | 8 / 8 | 2 的幂，至少 D |
+| IQ_ALU_DEPTH / IQ_MEM_DEPTH | 7 / 4 | 正整数，至少 D；选择树补齐到 2 的幂 |
+| LQ_DEPTH / SQ_DEPTH | 4 / 8 | 2 的幂，至少 D |
 | FETCH_QUEUE_DEPTH（F） | 16 | 2 的幂，至少 D |
 | IFETCH_OUTSTANDING | 8 | 1–16，不大于 F；当前路径已被 ICache 接受且未返回的指令槽数 |
 | ICACHE_SIZE_BYTES | 1024 | 2 的幂，至少 ICACHE_WAYS × ICACHE_LINE_BYTES |
@@ -42,7 +42,7 @@ A 维护公共参数与位布局；类型采用普通 packed 向量，不要求 
 | ICACHE_LINE_BYTES | 32 | 16/32/64 字节 |
 | DCACHE_SIZE_BYTES | 16384 | 全部路的数据总容量，2 的幂，至少 DCACHE_WAYS × DCACHE_LINE_BYTES |
 | DCACHE_WAYS | 2 | 1/2/4；1 路为直接映射，2/4 路为组相联 |
-| DCACHE_LINE_BYTES | 64 | 16/32/64 字节；write-back/write-allocate |
+| DCACHE_LINE_BYTES | 64 | 16/32/64/128 字节；write-back/write-allocate |
 | DATA_PREFETCH | 1 | 0/1；三个下一行预取 SRAM 缓冲，读请求只使用空闲通道 |
 | BP_ENABLE | 1 | 0/1；关闭时顺序预测且停止训练 |
 | BTB_ENTRIES | 32 | 2 的幂，至少 2，字地址索引、完整 tag、直接映射 |
@@ -148,7 +148,7 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 
 ### 3.3 位宽
 
-下表位数对应第 2 节的顶层默认参数（D=I=1、W=C=2、R=32、P=48、LQ=SQ=8、F=16、K=4）。各模块独立例化时按其实际参数重算。
+下表位数对应第 2 节的顶层默认参数（D=I=1、W=C=2、R=32、P=48、LQ=4、SQ=8、F=16、K=4）。各模块独立例化时按其实际参数重算。
 
 | 常量 | 公式 | 默认位数 |
 |---|---|---:|
@@ -168,12 +168,12 @@ ALU IQ/执行请求携带 cp_id，只有控制流操作消费；乘除入口不�
 | `CP_ALLOC_BITS` | CIDW + TAG_BITS + 32 | 39 |
 | `FETCH_REDIRECT_BITS` | 32 + GEN_WIDTH | 48 |
 | `REG_COMMIT_BITS` | PW | 6 |
-| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 55 |
-| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 55 |
+| `IC_REQ_BITS` | GEN_WIDTH + FIDW + DCW + 32 | 53 |
+| `IC_RSP_BITS` | GEN_WIDTH + FIDW + DCW + 32×D | 53 |
 | `IF_REQ_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
 | `IF_RSP_BITS` | GEN_WIDTH + IF_ID_WIDTH + 32 | 51 |
-| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
-| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 51 |
+| `LD_REQ_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
+| `LD_RSP_BITS` | GEN_WIDTH + LIDW + 32 | 50 |
 | `MEM_LD_BITS` | GEN_WIDTH + DC_WORD_W + 32 | 52 |
 | `AXI_LD_BITS` | MEM_LD_BITS + 2（预取槽编号） | 54 |
 | `WRITE_REQ_BITS` | 32 + 32 + 4 | 68 |
@@ -489,9 +489,9 @@ module student_top #(
 
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 48,
-    parameter integer IQ_ALU_DEPTH = 4,
+    parameter integer IQ_ALU_DEPTH = 7,
     parameter integer IQ_MEM_DEPTH = 4,
-    parameter integer LQ_DEPTH = 8,
+    parameter integer LQ_DEPTH = 4,
     parameter integer SQ_DEPTH = 8,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer IFETCH_OUTSTANDING = 8,
@@ -530,7 +530,6 @@ module student_top #(
     input logic bvalid,
     output logic bready
 );
-endmodule
 ```
 
 ### 13.2 `fetch`
@@ -596,6 +595,7 @@ endmodule
 ```systemverilog
 module rename #(
     parameter integer DIRECT_RENAME = 0, CHECKPOINT_RAM = 0,
+    parameter integer CHECKPOINT_BANKED = 0,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
@@ -620,17 +620,15 @@ module rename #(
     parameter integer SQ_CW = $clog2(SQ_DEPTH + 1),
     parameter integer CCW = $clog2(CHECKPOINT_DEPTH + 1),
     parameter integer TAG_BITS = RW,
-    parameter integer DECODE_BITS = 32 + 32 + 6 + 5 + 5 + 5 + 32,
+    parameter integer DECODE_BITS = 117,
     parameter integer ROB_ALLOC_BITS = PW + 2 + SIDW,
-    parameter integer ALU_IQ_BITS = TAG_BITS + CIDW + 6 + PW + PW + PW + 32 + 32,
+    parameter integer ALU_IQ_BITS = TAG_BITS + CIDW + 6 + PW + PW + PW + 64,
     parameter integer MEM_IQ_BITS = TAG_BITS + 3 + MIDW + PW + PW + 32,
     parameter integer MEM_ALLOC_BITS = 1 + MIDW + TAG_BITS + PW,
     parameter integer CP_ALLOC_BITS = CIDW + TAG_BITS + 32,
     parameter integer REG_COMMIT_BITS = PW
 ) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
+    input logic clock, reset, squash_valid,
     input logic [CIDW-1:0] restore_cp_id,
     input logic [CHECKPOINT_DEPTH-1:0] cp_release_mask,
     input logic [CCW-1:0] cp_free,
@@ -638,7 +636,7 @@ module rename #(
     input logic decode_valid,
     output logic decode_ready,
     input logic [DCW-1:0] decode_count,
-    input logic [DISPATCH_WIDTH*DECODE_BITS-1:0] decode_uop, // decoded_uop_t × D
+    input logic [DISPATCH_WIDTH*DECODE_BITS-1:0] decode_uop,
     input logic [ROB_CW-1:0] rob_free,
     input logic [RW-1:0] rob_tail,
     input logic [AIQ_CW-1:0] alu_iq_free,
@@ -650,22 +648,20 @@ module rename #(
     output logic disp_valid,
     input logic disp_ready,
     output logic [DCW-1:0] disp_count,
-    output logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob, // rob_alloc_t × D
-    output logic [DISPATCH_WIDTH*ALU_IQ_BITS-1:0] disp_alu, // alu_iq_t × D
-    output logic [DISPATCH_WIDTH*MEM_IQ_BITS-1:0] disp_mem, // mem_iq_t × D
-    output logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq, // mem_alloc_t × D
-    output logic [DISPATCH_WIDTH-1:0] disp_src1_ready,
-    output logic [DISPATCH_WIDTH-1:0] disp_src2_ready,
+    output logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob,
+    output logic [DISPATCH_WIDTH*ALU_IQ_BITS-1:0] disp_alu,
+    output logic [DISPATCH_WIDTH*MEM_IQ_BITS-1:0] disp_mem,
+    output logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq,
+    output logic [DISPATCH_WIDTH-1:0] disp_src1_ready, disp_src2_ready,
     output logic [DISPATCH_WIDTH-1:0] cp_alloc_valid,
-    output logic [DISPATCH_WIDTH*CP_ALLOC_BITS-1:0] cp_alloc_payload, // cp_alloc_t
+    output logic [DISPATCH_WIDTH*CP_ALLOC_BITS-1:0] cp_alloc_payload,
     output logic front_redirect_valid,
     output logic [31:0] front_redirect_pc,
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     input logic [COMMIT_WIDTH-1:0] reg_commit_valid,
-    input logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload // reg_commit_t
+    input logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload
 );
-endmodule
 ```
 
 ### 13.5 `prf`
@@ -673,6 +669,7 @@ endmodule
 ```systemverilog
 module prf #(
     parameter integer BYPASS_WRITE = 0,
+    parameter integer WORD_RAM = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer FORWARD_WIDTH = WB_WIDTH,
@@ -689,7 +686,6 @@ module prf #(
     input logic [FORWARD_WIDTH*PW-1:0] forward_pdst,
     input logic [FORWARD_WIDTH*32-1:0] forward_value
 );
-endmodule
 ```
 
 ### 13.6 `rob`
@@ -699,6 +695,7 @@ module rob #(
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
+    parameter integer EARLY_STORE_COMMIT = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer SQ_DEPTH = 8,
@@ -711,25 +708,23 @@ module rob #(
     parameter integer ROB_ALLOC_BITS = PW + 2 + SIDW,
     parameter integer REG_COMMIT_BITS = PW
 ) (
-    input logic clock,
-    input logic reset,
+    input logic clock, reset,
     input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic [TAG_BITS-1:0] squash_tag,
     input logic disp_fire,
     input logic [DCW-1:0] disp_count,
-    input logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob, // rob_alloc_t × D
+    input logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob,
     input logic [WB_WIDTH-1:0] done_valid,
-    input logic [WB_WIDTH*TAG_BITS-1:0] done_tag, // rob_tag_t × W
+    input logic [WB_WIDTH*TAG_BITS-1:0] done_tag,
     output logic [ROB_CW-1:0] rob_free,
     output logic [RW-1:0] rob_tail,
     output logic [RW-1:0] rob_head,
     output logic [COMMIT_WIDTH-1:0] reg_commit_valid,
-    output logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload, // reg_commit_t
+    output logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload,
     output logic st_start_valid,
     output logic [SIDW-1:0] st_start_id,
     input logic st_done_valid
 );
-endmodule
 ```
 
 ### 13.7 `branch_ctrl`
@@ -781,6 +776,7 @@ PIPELINED=1 时 cand_valid/cand_uop 来自每 lane 一个 candidate_reg；当前
 ```systemverilog
 module iq_alu #(
     parameter integer PIPELINED = 1,
+    parameter integer ORDERED_SELECT = 0,
     parameter integer ISSUE_WIDTH = 2, DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_ALU_DEPTH = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -804,14 +800,15 @@ module iq_alu #(
     output logic [ISSUE_WIDTH*ALU_IQ_BITS-1:0] cand_uop,
     input logic [ISSUE_WIDTH-1:0] cand_take
 );
-endmodule
 ```
 
 ### 13.9 `iq_mem`
 
 ```systemverilog
 module iq_mem #(
-    parameter integer PIPELINED = 1, EARLY_STORE = 0,
+    parameter integer PIPELINED = 1,
+    parameter integer ORDERED_SELECT = 0,
+    parameter integer EARLY_STORE = 0,
     parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
     parameter integer LQ_DEPTH = 8, SQ_DEPTH = 8,
@@ -833,11 +830,11 @@ module iq_mem #(
     input logic [WB_WIDTH-1:0] wake_valid,
     input logic [WB_WIDTH*PW-1:0] wake_pdst,
     output logic [MIQ_CW-1:0] mem_iq_free,
-    output logic cand_valid, cand_src2_ready,
+    output logic cand_valid,
+    output logic cand_src2_ready,
     output logic [MEM_IQ_BITS-1:0] cand_uop,
     input logic cand_take
 );
-endmodule
 ```
 
 `iq_mem` 的容量由 IQ_MEM_DEPTH 决定，当前顶层为 4 项。PIPELINED=1 时先搬入单项 candidate_reg；当前顶层 PIPELINED=0，组合选择最老已就绪项，cand_take 当拍释放原 IQ 槽。disp_prepare 表示包中属于此队列的 lane，与 dispatch ready 无关；disp_valid 是实际分配事件，必须为 disp_prepare 的子集。空闲槽按排名匹配，载荷可在握手前准备；valid、源就绪状态仍只在实际派遣时发布。ALU IQ 使用相同准备协议。
@@ -895,7 +892,8 @@ endmodule
 
 ```systemverilog
 module alu #(
-    parameter integer PIPELINED = 1, EARLY_RESOLVE = 0,
+    parameter integer PIPELINED = 1,
+    parameter integer EARLY_RESOLVE = 0, BRANCH_ISOLATE = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -903,99 +901,40 @@ module alu #(
     parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
     parameter integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1,
     parameter integer TAG_BITS = RW,
-    parameter integer ALU_EXEC_BITS = TAG_BITS + CIDW + 6 + PW + 32 + 32 + 32 + 32,
+    parameter integer ALU_EXEC_BITS = TAG_BITS + CIDW + 6 + PW + 128,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32,
     parameter integer RESOLVE_BITS = TAG_BITS + CIDW + 98
-) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
-    input logic [RW-1:0] rob_head,
-    input logic exec_valid,
-    input wire resolve_exec_valid,
-    output logic exec_ready,
-    input logic [ALU_EXEC_BITS-1:0] exec_payload, // alu_exec_t
-    output logic result_valid,
-    input logic result_ready,
-    output logic [RESULT_BITS-1:0] result_payload, // result_t
-    output logic resolve_valid,
-    output logic [RESOLVE_BITS-1:0] resolve_payload // branch_resolve_t
-);
-endmodule
-```
-
-### 13.12 `mul_div`
-
-```systemverilog
-module mul_div #(
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 64,
-    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
-    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer TAG_BITS = RW,
-    parameter integer MUL_EXEC_BITS = TAG_BITS + 3 + PW + 32 + 32,
-    parameter integer RESULT_BITS = TAG_BITS + PW + 32
-) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
-    input logic [RW-1:0] rob_head,
-    input logic exec_valid,
-    output logic exec_ready,
-    input logic [MUL_EXEC_BITS-1:0] exec_payload, // mul_exec_t
-    output logic result_valid,
-    input logic result_ready,
-    output logic [RESULT_BITS-1:0] result_payload // result_t
-);
-endmodule
-```
-
-### 13.13 `wb_arb`
-
-```systemverilog
-module wb_arb #(
-    parameter integer PIPELINED = 0,
-    parameter integer FILTER_AFTER_SELECT = 0,
-    parameter integer ISSUE_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 64,
-    parameter integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1,
-    parameter integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1,
-    parameter integer FU_SRC_COUNT = ISSUE_WIDTH + 2,
-    parameter integer TAG_BITS = RW,
-    parameter integer RESULT_BITS = TAG_BITS + PW + 32
 ) (
     input logic clock, reset,
     input logic squash_valid,
     input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
-    input logic [ISSUE_WIDTH-1:0] alu_result_valid,
-    output logic [ISSUE_WIDTH-1:0] alu_result_ready,
-    input logic [ISSUE_WIDTH*RESULT_BITS-1:0] alu_result_payload,
-    input logic mul_result_valid,
-    output logic mul_result_ready,
-    input logic [RESULT_BITS-1:0] mul_result_payload,
-    input logic lsu_result_valid,
-    output logic lsu_result_ready,
-    input logic [RESULT_BITS-1:0] lsu_result_payload,
-    output logic [WB_WIDTH-1:0] done_valid,
-    output logic [WB_WIDTH*TAG_BITS-1:0] done_tag,
-    output logic [WB_WIDTH-1:0] write_valid,
-    output logic [WB_WIDTH*PW-1:0] write_pdst,
-    output logic [WB_WIDTH*32-1:0] write_value
+    input logic exec_valid,
+    input wire resolve_exec_valid,
+    input wire [31:0] branch_operand1, branch_operand2,
+    output logic exec_ready,
+    input logic [ALU_EXEC_BITS-1:0] exec_payload,
+    output logic result_valid,
+    input logic result_ready,
+    output logic [RESULT_BITS-1:0] result_payload,
+    output logic resolve_valid,
+    output logic [RESOLVE_BITS-1:0] resolve_payload
 );
-endmodule
 ```
 
 ### 13.14 `lsu`
 
 ```systemverilog
 module lsu #(
-    parameter integer PIPELINED = 1, RESULT_PIPELINED = PIPELINED,
-    parameter integer BUFFER_STORES = 0, EARLY_STORE = 0, EARLY_LOAD = 0, FORWARD_WIDTH = 3,
+    parameter integer PIPELINED = 1,
+    parameter integer RESULT_PIPELINED = PIPELINED,
+    parameter integer BUFFER_STORES = 0,
+    parameter integer STORE_FORWARD = 0,
+    parameter integer RESPONSE_FIRST = 0,
+    parameter integer REGISTER_STORE_RESULT = 0, STORE_LOOKAHEAD = 0,
+    parameter integer BYPASS_STORE_RESULTS = 0, SPEC_READ_PREVIEW = 0,
+    parameter integer EARLY_STORE_COMMIT = 0,
+    parameter integer EARLY_STORE = 0, EARLY_LOAD = 0, FORWARD_WIDTH=3,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
@@ -1012,20 +951,18 @@ module lsu #(
     parameter integer SQ_CW = $clog2(SQ_DEPTH + 1),
     parameter integer TAG_BITS = RW,
     parameter integer MEM_ALLOC_BITS = 1 + MIDW + TAG_BITS + PW,
-    parameter integer MEM_EXEC_BITS = TAG_BITS + 3 + MIDW + 32 + 32 + 32,
+    parameter integer MEM_EXEC_BITS = TAG_BITS + 3 + MIDW + 96,
     parameter integer RESULT_BITS = TAG_BITS + PW + 32,
     parameter integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32,
     parameter integer LD_RSP_BITS = GEN_WIDTH + LIDW + 32,
-    parameter integer WRITE_REQ_BITS = 32 + 32 + 4
+    parameter integer WRITE_REQ_BITS = 68
 ) (
-    input logic clock,
-    input logic reset,
-    input logic squash_valid,
-    input logic [TAG_BITS-1:0] squash_tag, // rob_tag_t
+    input logic clock, reset, squash_valid,
+    input logic [TAG_BITS-1:0] squash_tag,
     input logic [RW-1:0] rob_head,
     input logic [GEN_WIDTH-1:0] current_gen,
     input logic [DISPATCH_WIDTH-1:0] disp_valid,
-    input logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq, // mem_alloc_t × D
+    input logic [DISPATCH_WIDTH*MEM_ALLOC_BITS-1:0] disp_lsq,
     output logic [LQ_CW-1:0] lq_free,
     output logic [SQ_CW-1:0] sq_free,
     output logic [DISPATCH_WIDTH*LIDW-1:0] lq_alloc_id,
@@ -1036,27 +973,27 @@ module lsu #(
     input wire [FORWARD_WIDTH*PW-1:0] forward_pdst,
     input wire [FORWARD_WIDTH*32-1:0] forward_value,
     input logic exec_valid,
+    input wire read_exec_valid,
     output logic exec_ready,
-    input logic [MEM_EXEC_BITS-1:0] exec_payload, // mem_exec_t
+    input logic [MEM_EXEC_BITS-1:0] exec_payload,
     output wire early_load_valid,
     output wire [PW-1:0] early_load_pdst,
     output logic result_valid,
     input logic result_ready,
-    output logic [RESULT_BITS-1:0] result_payload, // result_t
+    output logic [RESULT_BITS-1:0] result_payload,
     input logic st_start_valid,
     input logic [SIDW-1:0] st_start_id,
     output logic st_done_valid,
     output logic ld_req_valid,
     input logic ld_req_ready,
-    output logic [LD_REQ_BITS-1:0] ld_req_payload, // ld_req_t
+    output logic [LD_REQ_BITS-1:0] ld_req_payload,
     input logic ld_rsp_valid,
-    input logic [LD_RSP_BITS-1:0] ld_rsp_payload, // ld_rsp_t
+    input logic [LD_RSP_BITS-1:0] ld_rsp_payload,
     output logic st_req_valid,
     input logic st_req_ready,
-    output logic [WRITE_REQ_BITS-1:0] st_req_payload, // write_req_t
+    output logic [WRITE_REQ_BITS-1:0] st_req_payload,
     input logic st_rsp_valid
 );
-endmodule
 ```
 
 ### 13.15 `axi_bridge`
@@ -1151,10 +1088,12 @@ endmodule
 
 ```systemverilog
 module branch_predictor #(
-    parameter integer HISTORY_BITS = 0,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer BP_ENABLE = 1,
+    parameter integer HISTORY_BITS = 0,
+    parameter integer GLOBAL_HISTORY = 0,
+    parameter integer BTB_RAM = 0,
     parameter integer BTB_ENTRIES = 64,
     parameter integer BHT_ENTRIES = 256,
     parameter integer BP_TRAIN_BITS = 66
@@ -1167,7 +1106,6 @@ module branch_predictor #(
     input logic [ISSUE_WIDTH-1:0] train_valid,
     input logic [ISSUE_WIDTH*BP_TRAIN_BITS-1:0] train_payload
 );
-endmodule
 ```
 
 ## 14. 顶层连接
@@ -1239,8 +1177,10 @@ CPU ld_req/ld_rsp 为 GEN_WIDTH+LIDW+32 位；Cache 到桥的 mem_ld_req/mem_ld_
 
 ```systemverilog
 module dcache #(
-    parameter integer BULK_REFILL = 0, REFILL_HITS = 0,
     parameter integer SIZE_BYTES = 4096,
+    parameter integer BULK_REFILL = 0, REFILL_HITS = 0,
+    parameter integer HIT_UNDER_MISS = 0,
+    parameter integer STORE_PIPELINE = 0,
     parameter integer WAYS = 2,
     parameter integer LINE_BYTES = 32,
     parameter integer LQ_DEPTH = 4,
@@ -1266,15 +1206,14 @@ module dcache #(
     output wire [MEM_LD_BITS-1:0] mem_ld_req_payload,
     input wire mem_ld_rsp_valid,
     input wire [MEM_LD_BITS-1:0] mem_ld_rsp_payload,
-    output wire line_req_valid,
-    input wire line_req_ready, line_rsp_valid,
-    input wire [LINE_BYTES*8-1:0] line_rsp_data,
     output wire mem_st_req_valid,
     input wire mem_st_req_ready,
     output wire [67:0] mem_st_req_payload,
-    input wire mem_st_rsp_valid
+    input wire mem_st_rsp_valid,
+    output wire line_req_valid, input wire line_req_ready,
+    input wire line_rsp_valid,
+    input wire [LINE_BYTES*8-1:0] line_rsp_data
 );
-endmodule
 ```
 
 ### 18.2 控制信号分发与完成结果转发
@@ -1489,3 +1428,75 @@ DCache 新参数 `BULK_REFILL=0` 和端口 `line_req_valid/line_req_ready`、`li
 | perf_towers | 7264 | 0.7266 |
 | perf_vvadd | 6046 | 0.7483 |
 | 几何平均 | — | **0.7575** |
+
+## 21. Tier 2 单发射优化（200 MHz 目标）
+
+本节覆盖第 17–20 节的历史配置。当前 I=D=1、W=C=2，每拍最多从 ALU/MUL 与 MEM 候选中选一条指令；多执行单元同时完成不增加发射宽度。仿真监视器检查每拍实际 cand_take 总数不超过 ISSUE_WIDTH。外部 AXI 端口和所有现有 packed 载荷位布局不变。
+
+### 21.1 IQ、读数和分支恢复
+
+`iq_core`、`iq_alu`、`iq_mem` 新增 `ORDERED_SELECT=0`。顶层单发射设为 1：入队时记录槽之间的先后关系，候选为没有更老就绪项的就绪槽。派遣 lane 必须按 ROB 年龄递增；槽复用重建该槽的关系，清除/取消项不参与选择。默认 0 保留年龄比较树。当前 ALU IQ 7 项、MEM IQ 4 项，LQ 4 项、SQ 8 项。
+
+`single_issue` 新增 `EARLY_BRANCH=0`、`DELAYED_FORWARD=0`、`REGISTERED_LOAD_BRANCH=0`、`SNAPSHOT_LOAD_FORWARD=0`；顶层均开启。EX 分支解析使用独立的一次性事件，阻塞时不重复解析。顶层 ALU `EARLY_RESOLVE=1`、`BRANCH_ISOLATE=1`，分支恢复不等待 WB。`single_issue` 输出独立 `branch_operand1/branch_operand2[31:0]`，顶层旁路当前 ALU/MUL 完成与全部前一拍完成；ALU 的分支比较、JALR 加法使用该通路，普通结果加法保持原操作数通路，避免 SRAM 响应经共用加法器形成无功能意义的恢复长路径。单发射 PRF `BYPASS_WRITE=0`；RR 与完成同拍时，完成值在 EX 由前一拍完成副本补齐，当前拍真实完成具有更高优先级。ALU 预测唤醒仅使依赖者进入 RR，真实数据仍在 EX 取得。Load 使用实际完成唤醒（EARLY_LOAD=0）；RR 与当前 Load 完成同拍时保存 RAW 完成副本，EX 由前一拍完成值补齐。SNAPSHOT_LOAD_FORWARD 开启时，当前 LSU 完成不进入 EX 的所有 src1 和 ALU/MUL src2；MEM src2 仍允许当前完成旁路，满足提前执行地址而晚到数据的 Store。该模式要求 DELAYED_FORWARD=1、最后一个 forward lane 为 LSU、Load 使用实际完成唤醒。REGISTERED_LOAD_BRANCH 仅屏蔽当前 LSU 到分支的旁路，SNAPSHOT_LOAD_FORWARD 进一步覆盖地址和算术通路。实际发射仍每拍最多一条，不增加 Load 执行级数。
+
+`prf` 新增 `WORD_RAM=0`，顶层开启。p1..P-1 分别存入连续读取的独立 32 位 SRAM，p0 固定为零。前一拍实际 WB 写入的值旁路覆盖写拍的 SRAM 读空隙；同时命中时最高 WB lane 优先。复位仍只将 p1..p31 清零，其他物理字保留。复位分发与写后读旁路不改变 PRF 原有写边沿或 BYPASS_WRITE 语义。
+
+ALU/MEM 仲裁以 `(mem_tag<alu_tag) XOR (mem_tag<rob_head) XOR (alu_tag<rob_head)` 判定候选先后，等价于两个模 R 年龄相减再比较，避免在候选路径串联两组减法。该等价性已通过 R=32 的全输入 SAT 证明。
+
+`wb_arb` 新增 `DEDICATED_ALU=0`。I=1、W≥2 且开启时 ALU 保证有完成通道，其他完成使用剩余通道，避免 ALU 可执行条件与其分支恢复形成组合反馈。顶层开启。
+
+`rename` / `single_rename` 新增 `CHECKPOINT_BANKED=0`。与 CHECKPOINT_RAM 同时开启时，每个 checkpoint 使用独立 SRAM，连续读取，使 squash 边沿即可恢复 RAT。若所选 SRAM 刚写入，用当前 RAT 补齐写后读间隙；单路派遣下它恰好包含该分支自己的目的分配。默认 0 保留共享同步 SRAM 的延迟恢复。顶层单发射开启。
+
+### 21.2 Store 转发与授权退休
+
+LSU 新增 `STORE_FORWARD=0`、`RESPONSE_FIRST=0`、`EARLY_STORE_COMMIT=0`、`REGISTER_STORE_RESULT=0`、`STORE_LOOKAHEAD=0`，顶层均开启。RAM Load 等待所有未知地址旧 Store；地址已知时选择与所读字节重叠的最新旧 Store。只有它完整覆盖 Load、数据就绪且没有未知地址旧 Store 时转发，按 Load 类型扩展，不产生 Cache 请求、不占外部读额度。部分覆盖继续等待。已授权 Store 永远早于活跃 ROB 项，它们之间按提交 FIFO 顺序比较，不能用可复用的 ROB 编号比较。授权时记录 FIFO 槽 ticket，距 commit_head 的模 SQ_DEPTH 距离给出有效项的顺序，不再为每个 Load 搜索整个 FIFO；ticket 回绕保持同一顺序。
+
+RESPONSE_FIRST 使当前匹配 Load 响应优先使用结果通道，其他完成保留在 LQ/SQ；恢复仍取消年轻结果。当前响应按每个 LQ 槽独立核验 `{gen,id}`、有效位与等待状态，one-hot 选择 ROB tag 和物理目的；响应优先时，已就绪队列的年龄选择树不包含当前响应，返回数据与身份直接覆盖队列结果。选择顺序和背压保持不变，减少响应身份经年龄树后再唤醒 IQ 的组合深度。当前顶层 LSU `PIPELINED=0`、`RESULT_PIPELINED=0`、`EARLY_LOAD=0`，空请求和完成缓冲可直通；实际 Load 完成唤醒配合 RR 边沿保存完成值，隔断 Cache→EX AGU→消歧→Cache 的路径。REGISTER_STORE_RESULT 使 Store 在地址/数据记录入 SQ 后报告完成。STORE_LOOKAHEAD 在前一笔提交写完成当拍预览下一笔 FIFO Store，允许连续写握手；完成身份仍属于前一笔。已缓冲 Store 的写载荷来自 SQ，不经过当前 AGU 旁路。
+
+ROB 同样新增 `EARLY_STORE_COMMIT=0`，必须与 LSU 一致。开启且 BUFFER_STORES=1 时，RAM Store 在头部授权边沿进入提交 FIFO，st_done_valid 可在该边沿应答，ROB 可同时退休它和允许的后继非 Store。每拍仍只授权一条 Store。SQ 保留到真实写完成，提交 FIFO 跨 squash 保留。MMIO 仍等待自身真实写响应，不提前退休或退出。
+
+### 21.3 Cache 与预取
+
+DCache 新增 `HIT_UNDER_MISS=0`，顶层与 `REFILL_HITS` 均开启。同一回填行已返回的字可独立响应；逐字回填没有占用 SRAM 的周期可接收一个额外 Load 探测其他有效行。额外命中与原回填响应冲突时保存命中数据；额外 miss 保存请求身份，原回填安装后重试。开始替换时使受害行失效，防止回填中读取正在覆盖的旧数据。响应可不按接受顺序返回，始终使用原 `{gen,id}`。
+
+DCache 新增 `STORE_PIPELINE=0`，顶层开启：Store 命中写一个字库时，可同步探测不同字库的后继请求。同一字库请求仍背压；部分探测 miss 重新读取完整 victim 数据，脏行额外读取阶段保留首次探测取得的 tag，避免从未使能的同步 tag SRAM 采集无效输出。
+
+Cache 请求锁存的地址、数据、身份和类型按小组分发接受使能，保持原握手边沿和有效载荷。单发射 RR 捕获使能同样按 32 位载荷块与两路操作数分别分发。当前与前一拍完成的操作数转发匹配按 16 位输出块分发，分支与普通执行使用独立控制副本；取指输出 FIFO 按 16 位载荷块分发写使能。这些分组不增加寄存级或改变握手。
+
+Cache 与预取缓冲的单字读取按每 4 位输出分发字索引，覆盖普通命中、hit-under-miss、bulk 返回、回填行已返回字及脏行写回，限制索引位驱动整个 Cache line 多路选择器的扇出。握手、字序和 SRAM 读取边沿保持不变。
+
+写数据按字广播并局部选择，写掩码选择真正修改的 SRAM 字库，避免将单字先移位到整行产生高扇出控制。整行回填仍使用分组选择。
+
+`data_prefetch` 新增 `TARGETED_INVALIDATE=0` 及输入 `write_addr[31:0]`。顶层开启后，外部写握手仅使相同 Cache line 的预取快照失效；无关地址保留。受影响的在途预取标记丢弃，排空后才复用槽。默认 0 保留所有预取快照失效的行为。
+
+当前预测器新增 `GLOBAL_HISTORY=0`、`BTB_RAM=0`，顶层 HISTORY_BITS=8、GLOBAL_HISTORY=1、BTB_RAM=1。BTB tag、目标和条件类型存入连续读取的独立 SRAM；刚训练的载荷旁路覆盖同步 SRAM 写后读间隙，预测不增加一级延迟。单解析 lane 的 SRAM 写数据是不依赖写有效位的预览，并按每 8 个 BTB word 分组分发；写使能独立控制实际更新。备用方向表使用 PC XOR 已解析条件分支的全局历史索引，保留 bimodal 表与选择器；关闭该参数仍使用各 BTB 项的局部历史。
+
+ALU 和 LSU 的 32 位加法使用 `word_adder(a[31:0], b[31:0], carry_in, sum[31:0])`，计算 `(a+b+carry_in) mod 2^32`。每 4 位一个局部加法单元，8 组间采用并行前缀进位；保留组边界以限制映射后的串行进位深度。无寄存器、无协议延迟，原载荷语义保持。
+
+ALU 的无符号大小及相等比较使用组合模块 `word_compare(a[31:0], b[31:0], less, equal)`。8 个 4 位比较器并行工作，最高不同组决定大小；有符号比较先比较符号位。`word_adder` 和 `word_compare` 都已通过全输入 SAT 等价证明。
+
+LSU 新增 `BYPASS_STORE_RESULTS=0`，顶层开启：RESULT_PIPELINED=1 时，空结果缓冲可直通已登记地址/数据的 Store 完成；目的和值为语义零，背压时仍锁存结果。该参数只改变 RESULT_PIPELINED=1 的空缓冲 Store 完成路径；当前顶层 RESULT_PIPELINED=0。
+
+LSU 新增 `SPEC_READ_PREVIEW=0` 及 `read_exec_valid` 输入，顶层接 `single_issue.mem_exec_preview_valid`。开启时 RAM 读请求预览不依赖当拍 squash；实际执行、队列更新和完成仍受 squash 过滤。同拍被取消的已接受读按原 `{gen,id}` 排空并归还额度，不能写复用槽；未接受的取消预览不能留在 offer 缓冲。非 RAM 读仍不出外部请求。默认 0 时忽略该输入，保持原 exec_valid 资格。
+
+### 21.4 验证状态
+
+当前版本 v19 在 Docker 中顺序运行，测试与综合不重叠，语言模式为 SystemVerilog 2005。保持 I=D=1、W=C=2；性能仿真断言每拍实际发射数不超过 1。
+
+本批次单发射转发/背压/取消三种配置均通过，取指定向检查覆盖 D=1/2/4、读额度和分支位置。日志：`build/tier2/v19-directed.log`、`build/tier2/v19-branch.log`。此前 LSU 返回代际、取消预览、Store 转发和提交缓冲检查通过，日志：`build/tier2/v18-directed.log`。
+
+六项原性能程序采用 LATENCY=10 与原动态指令数，输出均正确。IPC 报告：`build/tier2/single-v19/profile.json`；其中源码 SHA-256 已与当前源码核对一致。
+
+| 程序 | 周期 | IPC |
+|---|---:|---:|
+| perf_median | 9081 | 0.7665 |
+| perf_multiply | 24124 | 0.9004 |
+| perf_qsort | 188216 | 0.7433 |
+| perf_rsort | 212069 | 0.9229 |
+| perf_towers | 6715 | 0.7860 |
+| perf_vvadd | 5781 | 0.7826 |
+| 几何平均 | — | **0.8142** |
+
+原 Tier 2 门槛为 0.845，本轮按用户要求放宽到 0.8；频率须达到 200 MHz，面积须不超过 18,000 µm²。当前 IPC 达标。v19 的 `make synth SYNTH_OUT=build/tier2/single-v19/synth` 成功完成：面积 **17,984.779 µm²**，估计频率 **172.55 MHz**，最小周期 **5.7953 ns**，5.0 ns 约束的最差建立裕量 **-0.7951 ns**。面积达标，200 MHz 时序未达标，因此本版尚未满足全部放宽要求。报告：`build/tier2/single-v19/synth/opt/report.txt`、`report.json`、`timing.rpt`；综合输入 SHA-256 已与当前 RTL 核对一致。当前最差路径终点为重命名 checkpoint SRAM 写数据输入。
+
+此前 v10 完整 19 项正确性程序均通过；当前 v19 尚未重跑完整正确性。本批次仅覆盖上述定向与性能验证，不得将此前版本的全套正确性结果视为本版的完整验证。

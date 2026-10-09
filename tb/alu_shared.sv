@@ -1,4 +1,4 @@
-module alu_shared_test;
+module alu_shared_test #(parameter integer ISOLATE=0);
     reg clock=0; always #5 clock=~clock;
     reg reset=1, exec_valid=0;
     reg [146:0] exec_payload=0;
@@ -8,8 +8,8 @@ module alu_shared_test;
     reg [31:0] a,b,imm,pc,expected,target,npc;
     reg taken, control_flow;
     reg [31:0] random_state=32'hf019ace1;
-    alu dut (.clock, .reset, .squash_valid(1'b0), .squash_tag(5'd0), .rob_head(5'd0),
-        .exec_valid, .resolve_exec_valid(1'b0), .exec_ready, .exec_payload, .result_valid, .result_ready(1'b1),
+    alu #(.BRANCH_ISOLATE(ISOLATE)) dut (.clock, .reset, .squash_valid(1'b0), .squash_tag(5'd0), .rob_head(5'd0),
+        .exec_valid, .resolve_exec_valid(1'b0), .branch_operand1(a), .branch_operand2(b), .exec_ready, .exec_payload, .result_valid, .result_ready(1'b1),
         .result_payload, .resolve_valid, .resolve_payload);
     initial begin
         @(posedge clock); @(negedge clock); reset=0;
@@ -54,7 +54,7 @@ module alu_shared_test;
                 endcase
                 if (taken) npc=target;
                 exec_valid=1;
-                exec_payload={5'd0,2'd0,6'(op),6'd32,pc,imm,a,b};
+                exec_payload={5'd0,2'd0,6'(op),6'd32,pc,imm,(ISOLATE!=0 && control_flow)?~a:a,b};
                 @(posedge clock); #1;
                 if (!result_valid || result_payload!=={5'd0,6'd32,expected})
                     $fatal(1,"shared ALU op=%0d a=%h b=%h imm=%h got=%h expected=%h",

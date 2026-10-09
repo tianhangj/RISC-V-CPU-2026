@@ -1,5 +1,6 @@
 module single_rename #(
     parameter integer DIRECT_RENAME = 0, CHECKPOINT_RAM = 0,
+    parameter integer CHECKPOINT_BANKED = 0,
     parameter integer DISPATCH_WIDTH = 1,
     parameter integer WB_WIDTH = 1,
     parameter integer COMMIT_WIDTH = 1,
@@ -92,12 +93,36 @@ module single_rename #(
     wire [PW-1:0] ps1_q=DIRECT_RENAME!=0?rat[rs1]:ps1_reg;
     wire [PW-1:0] ps2_q=DIRECT_RENAME!=0?rat[rs2]:ps2_reg;
     wire front_fix_q=DIRECT_RENAME!=0?(!(op>=3 && op<=10) && npc!=pc+32'd4):front_fix_reg;
-    wire rename_hold=reset || squash_valid || (CHECKPOINT_RAM!=0 && restore_pending);
+    wire rename_hold=reset || squash_valid || (CHECKPOINT_RAM!=0 && CHECKPOINT_BANKED==0 && restore_pending);
     wire [32*PW-1:0] checkpoint_data, checkpoint_restore;
     for (genvar r=0; r<32; r=r+1) begin : g_checkpoint_data
         assign checkpoint_data[r*PW +: PW]=offer_rat[r];
     end
-    generate if (CHECKPOINT_RAM!=0) begin : g_checkpoint_ram
+    generate if (CHECKPOINT_RAM!=0 && CHECKPOINT_BANKED!=0) begin : g_checkpoint_preview
+        wire [CHECKPOINT_DEPTH*32*PW-1:0] restored_maps;
+        reg last_write;
+        reg [CIDW-1:0] last_write_id;
+        always @(posedge clock) begin
+            if (reset) last_write<=0;
+            else last_write<=cp_alloc_valid && !squash_valid;
+            if (cp_alloc_valid) last_write_id<=cp_alloc_id;
+        end
+        for (genvar cp=0; cp<CHECKPOINT_DEPTH; cp=cp+1) begin : g_bank
+            wire write_map=cp_alloc_valid && cp_alloc_id==CIDW'(cp) && !squash_valid;
+            sram_fakeram #(.DEPTH(1), .WIDTH(32*PW)) maps (
+                .clk(clock), .en(1'b1),
+                .we(write_map), .wmask(1'b1), .addr(1'b0), .wdata(checkpoint_data),
+                .rdata(restored_maps[cp*32*PW +: 32*PW]));
+        end
+        wire [32*CIDW-1:0] restore_select;
+        (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(CIDW), .BRANCHES(32))
+            distribute_restore(restore_cp_id,restore_select);
+        for (genvar r=0; r<32; r=r+1) begin : g_restore
+            assign checkpoint_restore[r*PW +: PW]=
+                last_write && restore_select[r*CIDW +: CIDW]==last_write_id ? rat[r] :
+                restored_maps[int'(restore_select[r*CIDW +: CIDW])*32*PW+r*PW +: PW];
+        end
+    end else if (CHECKPOINT_RAM!=0) begin : g_checkpoint_ram
         sram_fakeram #(.DEPTH(CHECKPOINT_DEPTH), .WIDTH(32*PW)) maps (
             .clk(clock), .en(squash_valid || cp_alloc_valid), .we(cp_alloc_valid && !squash_valid),
             .wmask(1'b1), .addr(squash_valid?restore_cp_id:cp_alloc_id),
@@ -190,7 +215,9 @@ module single_rename #(
             assign offer_rat[r]=DIRECT_RENAME!=0?((rd==r)?pdst:rat[r]):offer_rat_reg[r];
             always @(posedge clock) begin
                 if (reset) rat[r]<=PW'(r);
-                else if (CHECKPOINT_RAM!=0 && restore_pending) rat[r]<=checkpoint_restore[r*PW +: PW];
+                else if (CHECKPOINT_RAM!=0 && CHECKPOINT_BANKED!=0 && rn_control[2*r+1])
+                    rat[r]<=checkpoint_restore[r*PW +: PW];
+                else if (CHECKPOINT_RAM!=0 && CHECKPOINT_BANKED==0 && restore_pending) rat[r]<=checkpoint_restore[r*PW +: PW];
                 else if (CHECKPOINT_RAM==0 && rn_control[2*r+1]) rat[r]<=snapshot[restore_index[r*CIDW +: CIDW]][r];
                 else if (rn_control[2*r] && rd==r) rat[r]<=pdst;
                 if (rn_control[2*r]) offer_rat_reg[r]<=(rd==r)?pdst:rat[r];

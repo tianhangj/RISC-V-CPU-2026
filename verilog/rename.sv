@@ -1,5 +1,6 @@
 module rename #(
     parameter integer DIRECT_RENAME = 0, CHECKPOINT_RAM = 0,
+    parameter integer CHECKPOINT_BANKED = 0,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
@@ -67,7 +68,7 @@ module rename #(
     input logic [COMMIT_WIDTH*REG_COMMIT_BITS-1:0] reg_commit_payload
 );
     generate if (DISPATCH_WIDTH == 1) begin : g_pipeline
-        single_rename #(.DIRECT_RENAME(DIRECT_RENAME), .CHECKPOINT_RAM(CHECKPOINT_RAM), .DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH),
+        single_rename #(.DIRECT_RENAME(DIRECT_RENAME), .CHECKPOINT_RAM(CHECKPOINT_RAM), .CHECKPOINT_BANKED(CHECKPOINT_BANKED), .DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH),
             .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
             .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .IQ_MEM_DEPTH(IQ_MEM_DEPTH),
             .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) core (.*);

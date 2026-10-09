@@ -1,5 +1,6 @@
 module prf #(
     parameter integer BYPASS_WRITE = 0,
+    parameter integer WORD_RAM = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer FORWARD_WIDTH = WB_WIDTH,
@@ -80,6 +81,41 @@ module prf #(
         end
         assign rd_data[p*32 +: 32] = (addr == 0) ? 32'b0 : forwarded_value;
     end
+    if (WORD_RAM!=0) begin : g_word_ram
+        reg [WB_WIDTH-1:0] last_valid;
+        reg [WB_WIDTH*PW-1:0] last_pdst;
+        reg [WB_WIDTH*32-1:0] last_value;
+        reg last_reset;
+        wire [PRF_SIZE-1:0] previous_reset;
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PRF_SIZE))
+            distribute_previous_reset(last_reset,previous_reset);
+        always @(posedge clock) begin
+            last_reset<=reset;
+            last_valid<=reset?0:write_valid;
+            last_pdst<=write_pdst; last_value<=write_value;
+        end
+        for (genvar word_no=1; word_no<PRF_SIZE; word_no=word_no+1) begin : g_word
+            wire [31:0] ram_data;
+            reg [31:0] write_data, read_data;
+            reg write_word;
+            always @* begin
+                write_word=0; write_data=bank_write_value[(word_no/8)*WB_WIDTH*32 +: 32]; read_data=ram_data;
+                for (integer w=0; w<WB_WIDTH; w=w+1) begin
+                    if (write_valid[w] && write_pdst[w*PW +: PW]==PW'(word_no)) begin
+                        write_word=1;
+                        if (w>0) write_data=bank_write_value[((word_no/8)*WB_WIDTH+w)*32 +: 32];
+                    end
+                    if (last_valid[w] && last_pdst[w*PW +: PW]==PW'(word_no))
+                        read_data=last_value[w*32 +: 32];
+                end
+                if (previous_reset[word_no] && word_no<32) read_data=0;
+            end
+            sram_fakeram #(.DEPTH(1), .WIDTH(32)) word (
+                .clk(clock), .en(1'b1), .we(word_reset[2*word_no]?(word_no<32):write_word),
+                .wmask(1'b1), .addr(1'b0), .wdata(word_reset[2*word_no]?32'b0:write_data), .rdata(ram_data));
+            assign cells[word_no]=read_data;
+        end
+    end else begin : g_word_flops
     for (genvar word_no = 1; word_no < PRF_SIZE; word_no = word_no+1) begin : g_write_word
         wire [WB_WIDTH*2-1:0] write_enable;
         for (genvar w = 0; w < WB_WIDTH; w = w+1) begin : g_write_port
@@ -98,5 +134,6 @@ module prf #(
                                 bank_write_value[((word_no/8)*WB_WIDTH+w)*32+half*16 +: 16];
             end
         end
+    end
     end
 endmodule

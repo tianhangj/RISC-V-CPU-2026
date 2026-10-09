@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, default=ROOT / "build/branch-tests")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--case", action="append", help="run only the named test modules")
     parser.add_argument("--verilator")
     parser.add_argument("--appimage", default=str(DEFAULT_APPIMAGE))
     args = parser.parse_args()
@@ -30,8 +31,8 @@ def main():
             ("pc_increment_test", ["verilog/pc_increment.sv", "tb/pc_increment.sv"], []),
             ("branch_predictor_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], []),
             ("branch_ctrl_test", ["verilog/branch_ctrl.sv", "tb/branch_ctrl.sv"], []),
-            ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], []),
-            ("branch_alu_test", ["verilog/alu.sv", "tb/branch_alu.sv"], ["-GPIPELINED=0"]),
+            ("branch_alu_test", ["verilog/word_adder.sv", "verilog/word_compare.sv", "verilog/alu.sv", "tb/branch_alu.sv"], []),
+            ("branch_alu_test", ["verilog/word_adder.sv", "verilog/word_compare.sv", "verilog/alu.sv", "tb/branch_alu.sv"], ["-GPIPELINED=0"]),
             ("wb_arb_test", ["verilog/wb_arb.sv", "tb/wb_arb.sv"], []),
             ("fetch_prediction_test", ["verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "verilog/fetch.sv",
                                        "tb/fetch_prediction.sv"], []),
@@ -39,6 +40,12 @@ def main():
         cpu_sources = [str(path) for path in with_ram_source(read_sources(ROOT / "verilog/filelist.f"))]
         for width in (1, 2, 4):
             tests.append(("smoke", [*cpu_sources, "tb/smoke.sv"], [f"-GWIDTH={width}"]))
+        if args.case:
+            known = {test[0] for test in tests}
+            unknown = set(args.case) - known
+            if unknown:
+                parser.error("unknown cases: " + ", ".join(sorted(unknown)))
+            tests = [test for test in tests if test[0] in args.case]
         output = args.build.resolve()
         output.mkdir(parents=True, exist_ok=True)
         for top, sources, parameters in tests:

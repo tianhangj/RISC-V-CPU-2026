@@ -3,6 +3,8 @@
 module dcache #(
     parameter integer SIZE_BYTES = 4096,
     parameter integer BULK_REFILL = 0, REFILL_HITS = 0,
+    parameter integer HIT_UNDER_MISS = 0,
+    parameter integer STORE_PIPELINE = 0,
     parameter integer WAYS = 2,
     parameter integer LINE_BYTES = 32,
     parameter integer LQ_DEPTH = 4,
@@ -49,8 +51,8 @@ module dcache #(
     localparam [3:0] IDLE = 0, VICTIM = 1, WRITEBACK = 2,
         WRITE_WAIT = 3, REFILL = 4, INSTALL = 5, FLUSH_SCAN = 6,
         IO_SEND = 7, IO_WAIT = 8, PROBE = 9;
-    reg [3:0] state;
-    reg bulk_busy;
+    (* keep *) reg [3:0] state;
+    reg bulk_busy, probe_partial;
     wire bulk_response=BULK_REFILL!=0 && line_rsp_valid;
     assign line_req_valid=BULK_REFILL!=0 && state==REFILL && sent_count==0 && !bulk_busy;
     wire bulk_fire=line_req_valid && line_req_ready;
@@ -76,14 +78,38 @@ module dcache #(
         !(mem_ld_rsp_valid && response_word==request_word && !request_store);
     wire refill_load_fire=ld_req_valid && refill_load_ready;
     reg [LD_BITS-1:0] miss_response;
+    reg hum_pending, hum_probe, hum_retry, hum_held;
+    reg [LD_BITS-1:0] hum_request;
+    reg [31:0] hum_data;
+    wire [SET_W-1:0] hum_set=SET_W'((hum_request[31:0]>>OFFSET_W)&(SETS-1));
+    wire [WORD_W-1:0] hum_word=hum_request[2 +: WORD_W];
+    wire [WAYS*32-1:0] hum_probe_words;
+    wire [WAYS*8*WORD_W-1:0] hum_word_select;
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(WAYS*8))
+        distribute_hum_word(hum_word,hum_word_select);
+    for (genvar way=0; way<WAYS; way=way+1) begin : g_hum_word
+        for (genvar part=0; part<8; part=part+1) begin : g_part
+            wire [WORD_W-1:0] selected=hum_word_select[(way*8+part)*WORD_W +: WORD_W];
+            assign hum_probe_words[way*32+part*4 +: 4]=way_rdata[way*LINE_BITS+32*selected+part*4 +: 4];
+        end
+    end
+    reg hum_hit;
+    reg [31:0] hum_hit_data;
+    wire primary_response=hit_load || miss_pending || refill_hit_pending || (bulk_response && !request_store);
+    wire hum_response=hum_pending && (hum_held || (hum_probe && hum_hit)) && !primary_response;
+    wire hum_can_read=HIT_UNDER_MISS!=0 && state==REFILL && !mem_ld_rsp_valid &&
+        !bulk_busy && !bulk_response && !hum_pending && !refill_load_ready;
+    wire hum_accept=ld_req_valid && hum_can_read;
+    wire replay_hum=hum_pending && hum_retry && state==IDLE;
 
     wire [1:0] lookup_store_select;
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2))
-        distribute_lookup_store(st_req_valid,lookup_store_select);
+        distribute_lookup_store(st_req_valid && !replay_hum && state!=REFILL,lookup_store_select);
     wire [31:0] lookup_addr;
     for (genvar half=0; half<2; half=half+1) begin : g_lookup_addr
         assign lookup_addr[half*16 +: 16]=lookup_store_select[half]?
-            st_req_payload[36+half*16 +: 16]:ld_req_payload[half*16 +: 16];
+            st_req_payload[36+half*16 +: 16]:replay_hum?
+            hum_request[half*16 +: 16]:ld_req_payload[half*16 +: 16];
     end
     wire [SET_W-1:0] lookup_set = SET_W'((lookup_addr >> OFFSET_W) & (SETS-1));
     wire [SET_W-1:0] request_set = SET_W'((request_addr >> OFFSET_W) & (SETS-1));
@@ -113,11 +139,19 @@ module dcache #(
             end
         end
     end
+    always @* begin
+        hum_hit=0; hum_hit_data=0;
+        for (integer way=0; way<WAYS; way=way+1)
+            if (valid[way*SETS+hum_set] && tag_rdata[way*TAG_W +: TAG_W]==hum_request[31 -: TAG_W]) begin
+                hum_hit=1;
+                hum_hit_data=hum_probe_words[way*32 +: 32];
+            end
+    end
     wire hit_load = state == PROBE && lookup_hit && !request_store;
     wire hit_store = state == PROBE && lookup_hit && request_store;
     wire writeback_complete = state == WRITE_WAIT &&
         (received_count == WORDS || (mem_st_rsp_valid && received_count == WORDS-1));
-    wire tag_en = (accept && ram_address) || state == INSTALL ||
+    wire tag_en = ((accept || hum_accept) && ram_address) || state == INSTALL ||
         (state == FLUSH_SCAN && flush_valid[1]);
     wire [SET_W-1:0] tag_addr = state == INSTALL ? request_set :
         state == FLUSH_SCAN ? flush_set : lookup_set;
@@ -137,14 +171,23 @@ module dcache #(
             flush_index[n] = flush_valid[2*n] ? flush_index[2*n] : flush_index[2*n+1];
         end
     end
-    assign st_req_ready = state == IDLE || hit_load;
-    assign ld_req_ready = (st_req_ready && !st_req_valid) || refill_load_ready;
+    // Separate word banks can probe the next request while the previous
+    // Store writes its word. Same-bank collisions retain the normal stall.
+    wire store_can_probe=STORE_PIPELINE!=0 && hit_store &&
+        lookup_addr[2 +: WORD_W]!=request_word;
+    assign st_req_ready = (state == IDLE && !replay_hum) || hit_load || store_can_probe;
+    assign ld_req_ready = (st_req_ready && !st_req_valid) || refill_load_ready ||
+        hum_can_read;
     wire accept_store = st_req_valid && st_req_ready;
-    wire accept_load = ld_req_valid && ld_req_ready && !refill_load_ready;
-    wire accept = accept_store || accept_load;
+    wire accept_load = ld_req_valid && ld_req_ready && !refill_load_ready && !hum_can_read;
+    wire accept = accept_store || accept_load || replay_hum;
     wire ram_address = lookup_addr[31:28] == 0;
-    assign ld_rsp_valid = hit_load || miss_pending || refill_hit_pending || (bulk_response && !request_store);
-    assign ld_rsp_payload = bulk_response ? {request_identity,line_rsp_data[32*request_word +: 32]} :
+    wire [6:0] accept_capture;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(7))
+        distribute_accept(accept,accept_capture);
+    assign ld_rsp_valid = primary_response || hum_response;
+    assign ld_rsp_payload = hum_response ? {hum_request[LD_BITS-1:32],hum_held?hum_data:hum_hit_data} :
+        bulk_response ? {request_identity,bulk_word} :
         state == PROBE ? {request_identity, hit_word} : refill_hit_pending ? refill_hit_response : miss_response;
     // A hit completes at the same edge that performs its SRAM write.
     assign st_rsp_valid = hit_store || store_pending;
@@ -152,25 +195,28 @@ module dcache #(
     reg ram_en, ram_we;
     reg [SET_W-1:0] ram_addr;
     reg [LINE_BYTES-1:0] ram_mask;
-    reg [LINE_BITS-1:0] ram_wdata;
     reg [WAY_W-1:0] ram_way;
-    wire read_all_ways = accept && ram_address;
+    wire read_all_ways = (accept || hum_accept) && ram_address;
     // Select the requested word in each way before the tag-dependent way mux.
     // A hit now controls only 32 data bits instead of the complete cache line.
     wire [WAYS*32-1:0] probe_words;
-    wire [WAYS*2*WORD_W-1:0] probe_word_select;
+    wire [(WAYS+1)*8*WORD_W-1:0] probe_word_select;
+    wire [31:0] bulk_word;
     wire [2*WAY_W-1:0] probe_way_select;
     wire [31:0] hit_word;
-    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(WAYS*2))
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES((WAYS+1)*8))
         distribute_probe_word(request_word,probe_word_select);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WAY_W), .BRANCHES(2))
         distribute_probe_way(hit_way,probe_way_select);
     for (genvar w=0; w<WAYS; w=w+1) begin : g_probe_word
-        for (genvar h=0; h<2; h=h+1) begin : g_half
-            wire [WORD_W-1:0] word_index=probe_word_select[(w*2+h)*WORD_W +: WORD_W];
-            assign probe_words[w*32+h*16 +: 16]=
-                way_rdata[w*LINE_BITS+32*word_index+h*16 +: 16];
+        for (genvar part=0; part<8; part=part+1) begin : g_part
+            wire [WORD_W-1:0] word_index=probe_word_select[(w*8+part)*WORD_W +: WORD_W];
+            assign probe_words[w*32+part*4 +: 4]=way_rdata[w*LINE_BITS+32*word_index+part*4 +: 4];
         end
+    end
+    for (genvar part=0; part<8; part=part+1) begin : g_bulk_word
+        wire [WORD_W-1:0] word_index=probe_word_select[(WAYS*8+part)*WORD_W +: WORD_W];
+        assign bulk_word[part*4 +: 4]=line_rsp_data[32*word_index+part*4 +: 4];
     end
     for (genvar h=0; h<2; h=h+1) begin : g_hit_word
         wire [WAY_W-1:0] way_index=probe_way_select[h*WAY_W +: WAY_W];
@@ -181,16 +227,19 @@ module dcache #(
         ram_we = 0;
         ram_addr = lookup_set;
         ram_mask = 0;
-        ram_wdata = 0;
         ram_way = victim_way;
-        if (accept && ram_address) ram_en = 1;
+        if ((accept || hum_accept) && ram_address) ram_en = 1;
         if (hit_store) begin
             ram_en = 1;
             ram_we = 1;
             ram_addr = request_set;
             ram_way = hit_way;
             ram_mask[4*request_word +: 4] = request_mask;
-            ram_wdata[32*request_word +: 32] = request_data;
+        end
+        if (STORE_PIPELINE!=0 && state==PROBE && !lookup_hit && probe_partial) begin
+            // The preceding Store occupied one bank at this probe's edge.
+            // Read the full victim before taking a dirty-line snapshot.
+            ram_en=1; ram_we=0; ram_addr=request_set; ram_way=replacement_way;
         end
         if (state == FLUSH_SCAN) begin
             ram_en = flush_valid[1];
@@ -202,7 +251,6 @@ module dcache #(
             ram_we = 1;
             ram_addr = request_set;
             ram_mask[4*response_word +: 4] = 4'b1111;
-            ram_wdata[32*response_word +: 32] = mem_ld_rsp_payload[31:0];
         end
         if (bulk_response) begin
             ram_en=1; ram_we=1; ram_addr=request_set; ram_way=victim_way;
@@ -215,12 +263,13 @@ module dcache #(
             ram_we = 1;
             ram_addr = request_set;
             ram_mask[4*request_word +: 4] = request_mask;
-            ram_wdata[32*request_word +: 32] = request_data;
         end
     end
     localparam integer BANK_CONTROL_BITS=3+WAY_W;
     wire [WAYS*WORDS*BANK_CONTROL_BITS-1:0] bank_control;
-    wire [WAYS*WORDS*SET_W-1:0] bank_address;
+    wire [WAYS*WORDS*SET_W-1:0] bank_address, bank_read_address;
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(SET_W), .BRANCHES(WAYS*WORDS))
+        distribute_bank_read_address(lookup_set,bank_read_address);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(BANK_CONTROL_BITS), .BRANCHES(WAYS*WORDS))
         distribute_bank_control({ram_way,read_all_ways,ram_we,ram_en},bank_control);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(SET_W), .BRANCHES(WAYS*WORDS))
@@ -230,10 +279,21 @@ module dcache #(
     wire [WORDS*2-1:0] bulk_select;
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(WORDS*2)) distribute_bulk(bulk_response,bulk_select);
     wire [WORDS*32-1:0] bank_wdata;
+    wire [WORDS*32-1:0] store_word_data, refill_word_data;
+    wire [WORDS*2-1:0] refill_select;
+    // The mask selects the word bank. Do not also barrel-shift write data
+    // into a zero-filled line: unselected banks never consume their data.
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(32), .BRANCHES(WORDS))
+        distribute_store_data(request_data,store_word_data);
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(32), .BRANCHES(WORDS))
+        distribute_refill_data(mem_ld_rsp_payload[31:0],refill_word_data);
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(WORDS*2))
+        distribute_refill_select(state==REFILL,refill_select);
     for (genvar word=0; word<WORDS; word=word+1) begin : g_write_data
         for (genvar h=0; h<2; h=h+1) begin : g_half
             assign bank_wdata[word*32+h*16 +: 16]=bulk_select[word*2+h]?
-                line_rsp_data[word*32+h*16 +: 16]:ram_wdata[word*32+h*16 +: 16];
+                line_rsp_data[word*32+h*16 +: 16]:refill_select[word*2+h]?
+                refill_word_data[word*32+h*16 +: 16]:store_word_data[word*32+h*16 +: 16];
         end
     end
     for (genvar way = 0; way < WAYS; way = way+1) begin : g_way
@@ -251,15 +311,28 @@ module dcache #(
         wire local_read=bank_control[BANK*BANK_CONTROL_BITS+2];
         wire [WAY_W-1:0] local_way=bank_control[BANK*BANK_CONTROL_BITS+3 +: WAY_W];
         wire bank_selected = !local_we || (|ram_mask[word*4 +: 4]);
-        wire bank_en;
+        wire bank_en, bank_we;
         wire [SET_W-1:0] bank_addr;
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) enable_mask (
-            .data(local_en), .enable(bank_selected &&
-                (local_read || local_way == WAY_W'(way))), .masked(bank_en));
-        (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(SET_W)) address_mask (
-            .data(bank_address[BANK*SET_W +: SET_W]), .enable(bank_selected), .masked(bank_addr));
+        if (STORE_PIPELINE!=0) begin : g_overlap
+            wire writes_word=local_we && (|ram_mask[word*4 +: 4]);
+            wire reads_bank=local_read && !writes_word;
+            assign bank_we=writes_word && local_way==WAY_W'(way);
+            (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) enable_mask (
+                .data(local_en), .enable(reads_bank ||
+                    (local_way==WAY_W'(way) && (writes_word || (!local_we && !local_read)))),
+                .masked(bank_en));
+            assign bank_addr=reads_bank ? bank_read_address[BANK*SET_W +: SET_W] :
+                bank_address[BANK*SET_W +: SET_W];
+        end else begin : g_serial
+            assign bank_we=local_we;
+            (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(1)) enable_mask (
+                .data(local_en), .enable(bank_selected &&
+                    (local_read || local_way==WAY_W'(way))), .masked(bank_en));
+            (* keep_hierarchy, keep *) cache_group_mask #(.WIDTH(SET_W)) address_mask (
+                .data(bank_address[BANK*SET_W +: SET_W]), .enable(bank_selected), .masked(bank_addr));
+        end
         sram_fakeram #(.DEPTH(SETS), .WIDTH(32), .WRITE_GRANULARITY(8)) data_ram (
-            .clk(clock), .en(bank_en), .we(local_we), .wmask(ram_mask[word*4 +: 4]),
+            .clk(clock), .en(bank_en), .we(bank_we), .wmask(ram_mask[word*4 +: 4]),
             .addr(bank_addr), .wdata(bank_wdata[word*32 +: 32]),
             .rdata(way_rdata[way*LINE_BITS+word*32 +: 32]));
     end
@@ -278,11 +351,23 @@ module dcache #(
     assign mem_ld_req_payload = {request_identity[GEN_WIDTH+LIDW-1 -: GEN_WIDTH],
         refill_index, (request_addr & ~(32'(LINE_BYTES-1))) + 32'(4*refill_index)};
     assign mem_st_req_valid = (state == WRITEBACK && sent_count < WORDS) || state == IO_SEND;
+    wire [8*WORD_W-1:0] writeback_word_select, refill_word_select;
+    wire [31:0] writeback_word, refill_word;
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(8))
+        distribute_writeback_word(WORD_W'(sent_count),writeback_word_select);
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(8))
+        distribute_refill_word(refill_load_word,refill_word_select);
+    for (genvar part=0; part<8; part=part+1) begin : g_victim_word
+        wire [WORD_W-1:0] wb_index=writeback_word_select[part*WORD_W +: WORD_W];
+        wire [WORD_W-1:0] ld_index=refill_word_select[part*WORD_W +: WORD_W];
+        assign writeback_word[part*4 +: 4]=victim_data[32*wb_index+part*4 +: 4];
+        assign refill_word[part*4 +: 4]=victim_data[32*ld_index+part*4 +: 4];
+    end
     assign mem_st_req_payload = state == IO_SEND ?
         {request_addr, request_data, request_mask} :
         {((32'(victim_tag) << (OFFSET_W+INDEX_BITS)) |
           (32'(victim_set) << OFFSET_W)) + 32'(4*sent_count),
-         victim_data[32*WORD_W'(sent_count) +: 32], 4'b1111};
+         writeback_word, 4'b1111};
     wire read_fire = mem_ld_req_valid && mem_ld_req_ready;
     wire write_fire = mem_st_req_valid && mem_st_req_ready;
 
@@ -304,24 +389,33 @@ module dcache #(
     end
     wire [WAY_W-1:0] capture_tag_way=victim_control[VICTIM_GROUPS*(WAY_W+1)+1 +: WAY_W];
     always @(posedge clock)
-        if (victim_control[VICTIM_GROUPS*(WAY_W+1)])
+        // SRAM outputs are invalid when disabled. The partial probe's
+        // extra VICTIM phase rereads data only; retain the tag captured in
+        // PROBE. MMIO scan still captures the tag read at FLUSH_SCAN.
+        if (victim_control[VICTIM_GROUPS*(WAY_W+1)] && (state!=VICTIM || flushing))
             victim_tag<=tag_rdata[capture_tag_way*TAG_W +: TAG_W];
+
+    for (genvar half=0; half<2; half=half+1) begin : g_request_capture
+        always @(posedge clock) begin
+            if (accept_capture[half]) request_addr[half*16 +: 16]<=lookup_addr[half*16 +: 16];
+            if (accept_capture[2+half]) request_data[half*16 +: 16]<=st_req_payload[4+half*16 +: 16];
+        end
+    end
+    always @(posedge clock) begin
+        if (accept_capture[4]) request_mask<=st_req_payload[3:0];
+        if (accept_capture[5]) request_identity<=replay_hum?hum_request[LD_BITS-1:32]:ld_req_payload[LD_BITS-1:32];
+        if (accept_capture[6]) request_store<=accept_store;
+    end
 
     always @(posedge clock) begin
         miss_pending <= 0;
         store_pending <= 0;
         refill_hit_pending<=refill_load_fire;
         if (refill_load_fire)
-            refill_hit_response<={ld_req_payload[LD_BITS-1:32],victim_data[32*refill_load_word +: 32]};
+            refill_hit_response<={ld_req_payload[LD_BITS-1:32],refill_word};
         if (state==PROBE && !lookup_hit) refill_valid<=0;
         if (state==REFILL && mem_ld_rsp_valid) refill_valid[response_word]<=1;
-        if (accept) begin
-            request_addr <= lookup_addr;
-            request_data <= st_req_payload[35:4];
-            request_mask <= st_req_payload[3:0];
-            request_identity <= ld_req_payload[LD_BITS-1:32];
-            request_store <= accept_store;
-        end
+        if (accept) probe_partial<=STORE_PIPELINE!=0 && hit_store;
         if (state == REFILL && mem_ld_rsp_valid && response_word == request_word) begin
             // Publish the critical word immediately; the remaining words still
             // fill the cache, even if the requesting load has been squashed.
@@ -331,7 +425,8 @@ module dcache #(
             end
         end
         if (reset) begin
-            state <= IDLE; bulk_busy<=0;
+            hum_pending<=0; hum_probe<=0; hum_retry<=0; hum_held<=0;
+            state <= IDLE; bulk_busy<=0; probe_partial<=0;
             refill_valid<=0; refill_hit_pending<=0;
             miss_pending <= 0;
             store_pending <= 0;
@@ -339,6 +434,16 @@ module dcache #(
             received_count <= 0;
             flushing <= 0;
         end else begin
+            hum_probe<=hum_accept;
+            if (hum_accept) begin
+                hum_pending<=1; hum_request<=ld_req_payload;
+                hum_retry<=0; hum_held<=0;
+            end
+            if (hum_probe) begin
+                if (!hum_hit) hum_retry<=1;
+                else if (primary_response) begin hum_held<=1; hum_data<=hum_hit_data; end
+            end
+            if (hum_response || replay_hum) begin hum_pending<=0; hum_retry<=0; hum_held<=0; end
             case (state)
                 IDLE, PROBE: begin
                     if (state == PROBE && !lookup_hit) begin
@@ -348,7 +453,8 @@ module dcache #(
                         received_count <= 0;
                         flushing <= 0;
                         state <= (valid[replacement_way*SETS+request_set] &&
-                            dirty[replacement_way*SETS+request_set]) ? WRITEBACK : REFILL;
+                            dirty[replacement_way*SETS+request_set]) ?
+                            (STORE_PIPELINE!=0 && probe_partial ? VICTIM : WRITEBACK) : REFILL;
                     end else begin
                         state <= IDLE;
                         if (accept) begin
@@ -439,6 +545,8 @@ module dcache #(
                 dirty[s] <= 0;
                 valid[s] <= 0;
             end else begin
+                if (HIT_UNDER_MISS!=0 && state==PROBE && !lookup_hit &&
+                    LINE_W'(replacement_way*SETS+request_set)==LINE_W'(s)) valid[s]<=0;
                 if (store_enable[s/GROUP_SIZE] && store_low) dirty[s] <= 1;
                 if (clear_enable[s/GROUP_SIZE] && victim_low) dirty[s] <= 0;
                 if (install_enable[s/GROUP_SIZE] && install_low) begin

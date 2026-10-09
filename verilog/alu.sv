@@ -1,6 +1,6 @@
 module alu #(
     parameter integer PIPELINED = 1,
-    parameter integer EARLY_RESOLVE = 0,
+    parameter integer EARLY_RESOLVE = 0, BRANCH_ISOLATE = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -18,6 +18,7 @@ module alu #(
     input logic [RW-1:0] rob_head,
     input logic exec_valid,
     input wire resolve_exec_valid,
+    input wire [31:0] branch_operand1, branch_operand2,
     output logic exec_ready,
     input logic [ALU_EXEC_BITS-1:0] exec_payload,
     output logic result_valid,
@@ -55,25 +56,38 @@ module alu #(
     wire [31:0] shift_value;
     for (genvar bit_no=0; bit_no<32; bit_no=bit_no+1)
         assign shift_value[bit_no]=is_left?shifted[31-bit_no]:shifted[bit_no];
-    wire unsigned_less=a<operand_b;
+    wire unsigned_less;
+    (* keep_hierarchy, keep *) word_compare result_compare(
+        .a(a), .b(operand_b), .less(unsigned_less), .equal());
     wire signed_less=(a[31]!=operand_b[31])?a[31]:unsigned_less;
-    wire target_op=in_op>=2 && in_op<=10;
+    wire target_op=in_op==2;
     wire [31:0] add_a=(target_op && in_op!=4)?in_pc:a;
     wire [31:0] add_b=target_op?in_imm:operand_b;
-    wire [31:0] add_value=add_a + (in_op==21?~add_b:add_b) + 32'(in_op==21);
+    wire [31:0] add_value;
+    (* keep_hierarchy, keep *) word_adder result_adder(
+        .a(add_a), .b(in_op==21?~add_b:add_b), .carry_in(in_op==21), .sum(add_value));
+    wire [31:0] branch_a=BRANCH_ISOLATE!=0?branch_operand1:a;
+    wire [31:0] branch_b=BRANCH_ISOLATE!=0?branch_operand2:b;
+    wire branch_unsigned_less, branch_equal;
+    (* keep_hierarchy, keep *) word_compare branch_compare(
+        .a(branch_a), .b(branch_b), .less(branch_unsigned_less), .equal(branch_equal));
+    wire branch_signed_less=(branch_a[31]!=branch_b[31])?branch_a[31]:branch_unsigned_less;
+    wire [31:0] branch_sum;
+    (* keep_hierarchy, keep *) word_adder branch_adder(
+        .a(in_op==4?branch_a:in_pc), .b(in_imm), .carry_in(1'b0), .sum(branch_sum));
     always_comb begin
         value=0; next_pc=in_pc+32'd4; control_flow=0; taken=0;
-        target=(in_op==4)?(add_value & 32'hfffffffe):add_value;
+        target=(in_op==4)?(branch_sum & 32'hfffffffe):branch_sum;
         case (in_op)
             1: value=in_imm;
             2,11,20,21: value=add_value;
             3,4: begin control_flow=1; taken=1; value=in_pc+32'd4; end
-            5: begin control_flow=1; taken=a==b; end
-            6: begin control_flow=1; taken=a!=b; end
-            7: begin control_flow=1; taken=signed_less; end
-            8: begin control_flow=1; taken=!signed_less; end
-            9: begin control_flow=1; taken=unsigned_less; end
-            10: begin control_flow=1; taken=!unsigned_less; end
+            5: begin control_flow=1; taken=branch_equal; end
+            6: begin control_flow=1; taken=!branch_equal; end
+            7: begin control_flow=1; taken=branch_signed_less; end
+            8: begin control_flow=1; taken=!branch_signed_less; end
+            9: begin control_flow=1; taken=branch_unsigned_less; end
+            10: begin control_flow=1; taken=!branch_unsigned_less; end
             12,23: value={31'd0,signed_less};
             13,24: value={31'd0,unsigned_less};
             14,25: value=a^operand_b;

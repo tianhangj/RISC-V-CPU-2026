@@ -28,32 +28,49 @@ def main():
             enter_appimage(args.appimage)
         verilator = verilator_command(args.verilator)
         tests = [
-            ("single_issue_test", ["verilog/single_issue.sv", "tb/single_issue.sv"], []),
+            ("branch_predictor_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/pc_increment.sv", "verilog/branch_predictor.sv", "tb/branch_predictor.sv"], ["-GRAM=1"]),
+            ("ordered_iq_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "tb/ordered_iq.sv"], []),
+            ("single_issue_test", ["verilog/signal_fanout.sv", "verilog/single_issue.sv", "tb/single_issue.sv"], []),
+            ("single_issue_test", ["verilog/signal_fanout.sv", "verilog/single_issue.sv", "tb/single_issue.sv"], ["-GDELAYED=1"]),
+            ("single_issue_test", ["verilog/signal_fanout.sv", "verilog/single_issue.sv", "tb/single_issue.sv"], ["-GSNAPSHOT=1"]),
             ("direct_rename_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/single_rename.sv", "tb/direct_rename.sv"], []),
-            ("alu_shared_test", ["verilog/alu.sv", "tb/alu_shared.sv"], []),
-            ("store_buffer_test", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_buffer.sv"], []),
+            ("direct_rename_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/single_rename.sv", "tb/direct_rename.sv"], ["-GEAGER=1"]),
+            ("alu_shared_test", ["verilog/word_adder.sv", "verilog/word_compare.sv", "verilog/alu.sv", "tb/alu_shared.sv"], []),
+            ("alu_shared_test", ["verilog/word_adder.sv", "verilog/word_compare.sv", "verilog/alu.sv", "tb/alu_shared.sv"], ["-GISOLATE=1"]),
+            ("store_buffer_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_buffer.sv"], []),
+            ("store_buffer_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_buffer.sv"], ["-GFAST=1"]),
+            ("store_buffer_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_buffer.sv"], ["-GFAST=2"]),
+            ("store_forward_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_forward.sv"], []),
+            ("store_forward_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/store_forward.sv"], ["-GBUFFERED=1"]),
             ("data_prefetch_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/data_prefetch.sv", "tb/data_prefetch.sv"], []),
+            ("data_prefetch_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/data_prefetch.sv", "tb/data_prefetch.sv"], ["-GTARGETED=1"]),
             ("wb_pipeline_test", ["verilog/wb_arb.sv", "tb/wb_pipeline.sv"], []),
             ("wb_late_filter_test", ["verilog/wb_arb.sv", "tb/wb_late_filter.sv"], []),
             ("rename_checkpoint_test", ["verilog/signal_fanout.sv", "verilog/single_rename.sv", "verilog/rename.sv", "tb/rename_checkpoint.sv"], []),
             ("rename_stream_test", ["verilog/signal_fanout.sv", "verilog/single_rename.sv", "verilog/rename.sv", "tb/rename_stream.sv"], []),
-            ("alu_forwarding_test", ["verilog/alu.sv", "tb/alu_forwarding.sv"], []),
+            ("alu_forwarding_test", ["verilog/word_adder.sv", "verilog/word_compare.sv", "verilog/alu.sv", "tb/alu_forwarding.sv"], []),
             ("iq_alu_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "tb/iq_alu_candidate.sv"], []),
             ("iq_mem_candidate_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/iq_mem.sv", "tb/iq_mem_candidate.sv"], []),
             ("selection_tree_test", ["verilog/signal_fanout.sv", "verilog/iq_alu.sv", "verilog/issue_sched.sv", "tb/selection_tree.sv"], []),
-            ("prf_hierarchical_test", ["verilog/signal_fanout.sv", "verilog/prf.sv", "tb/prf_hierarchical.sv"], []),
+            ("prf_hierarchical_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/prf.sv", "tb/prf_hierarchical.sv"], []),
+            ("prf_hierarchical_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/prf.sv", "tb/prf_hierarchical.sv"], ["-GRAM=1"]),
             ("mul_div_test", ["verilog/mul_div.sv", "tb/mul_div.sv"], []),
             ("dcache_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/dcache.sv",
                              "verilog/axi_bridge.sv", "tb/dcache.sv"], []),
             ("dcache_stage2_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/dcache.sv",
                              "verilog/axi_bridge.sv", "tb/dcache.sv"], []),
-            ("lsu_generation", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_generation.sv"], []),
-            ("lsu_generation", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_generation.sv"], ["-GP=0"]),
-            ("lsu_pipeline_test", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_pipeline.sv"], []),
-            ("lsu_pipeline_test", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_pipeline.sv"], ["-GP=0"]),
-            ("store_pipeline_test", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "verilog/rob.sv", "tb/store_pipeline.sv"], []),
-            ("lsu_disambiguation", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_disambiguation.sv"], []),
-            ("lsu_disambiguation", ["verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_disambiguation.sv"], ["-GP=0"]),
+            ("dcache_hum_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/dcache.sv",
+                             "verilog/axi_bridge.sv", "tb/dcache.sv"], []),
+            ("dcache_hum_test", ["scripts/ram/sram_fakeram.sv", "verilog/signal_fanout.sv", "verilog/dcache.sv",
+                             "verilog/axi_bridge.sv", "tb/dcache.sv"], ["-GLINE=128"]),
+            ("lsu_spec_read_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_spec_read.sv"], []),
+            ("lsu_generation", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_generation.sv"], []),
+            ("lsu_generation", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_generation.sv"], ["-GP=0"]),
+            ("lsu_pipeline_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_pipeline.sv"], []),
+            ("lsu_pipeline_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_pipeline.sv"], ["-GP=0"]),
+            ("store_pipeline_test", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "verilog/rob.sv", "tb/store_pipeline.sv"], []),
+            ("lsu_disambiguation", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_disambiguation.sv"], []),
+            ("lsu_disambiguation", ["verilog/word_adder.sv", "verilog/signal_fanout.sv", "verilog/lsu.sv", "tb/lsu_disambiguation.sv"], ["-GP=0"]),
         ]
         from build import read_sources
         tests.append(("pipeline_stages_test", [str(path) for path in read_sources(ROOT / "verilog/filelist.f")] +
@@ -70,7 +87,7 @@ def main():
         output = args.build.resolve()
         output.mkdir(parents=True, exist_ok=True)
         for top, sources, parameters in tests:
-            name = top + ("_" + parameters[0].split("=")[1] if parameters else "")
+            name = top + ("_" + parameters[0][2:].replace("=", "_") if parameters else "")
             directory = output / name
             log_path = output / (name + ".log")
             command = [verilator, "--binary", "--timing", "--assert",

@@ -2,6 +2,7 @@
 module ipc_stats_monitor (
     input wire clock, reset,
     input wire [31:0] issue_count, retire_count, dispatch_count,
+    input wire [31:0] issue_limit,
     input wire any_candidate, fetch_starved, rename_blocked,
     input wire rob_full, alu_full, mem_full, cp_full, lsq_full,
     input wire head_store_wait, head_load_wait, squash,
@@ -20,6 +21,7 @@ module ipc_stats_monitor (
             store_head = 0; load_head = 0; mispredict = 0; cache_misses = 0;
             cache_busy_cycles = 0; store_hits = 0; loads = 0; cache_stall = 0; wb_stall = 0;
         end else begin
+            if (issue_count>issue_limit) $fatal(1,"CPU exceeded its configured issue width");
             cycles = cycles+1;
             issued = issued+64'(issue_count);
             retired = retired+64'(retire_count);
@@ -57,6 +59,7 @@ endmodule
 bind student_top ipc_stats_monitor u_ipc_stats (
     .clock(clock), .reset(reset),
     .issue_count(32'($countones(alu_cand_take))+32'(mem_cand_take)),
+    .issue_limit(32'(ISSUE_WIDTH)),
     .retire_count(32'(u_rob.retire_count)),
     .dispatch_count(disp_fire ? 32'(disp_count) : 32'd0),
     .any_candidate((|alu_cand_valid) || mem_cand_valid),

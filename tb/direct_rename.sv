@@ -1,4 +1,4 @@
-module direct_rename_test;
+module direct_rename_test #(parameter integer EAGER=0);
     reg clock=0; always #5 clock=~clock;
     reg reset=1, squash_valid=0, decode_valid=0;
     reg [3:0] cp_release_mask=0;
@@ -8,7 +8,7 @@ module direct_rename_test;
     wire decode_ready, disp_valid, cp_alloc_valid, front_redirect_valid;
     wire [94:0] disp_alu;
     wire [31:0] front_redirect_pc;
-    single_rename #(.DIRECT_RENAME(1), .CHECKPOINT_RAM(1), .DISPATCH_WIDTH(1),
+    single_rename #(.DIRECT_RENAME(1), .CHECKPOINT_RAM(1), .CHECKPOINT_BANKED(EAGER), .DISPATCH_WIDTH(1),
         .WB_WIDTH(1), .COMMIT_WIDTH(1), .PRF_SIZE(48)) dut (
         .clock, .reset, .squash_valid, .restore_cp_id(2'd0), .cp_release_mask,
         .cp_free(3'd4), .cp_alloc_id(2'd0), .decode_valid, .decode_ready,
@@ -41,8 +41,9 @@ module direct_rename_test;
         instruction(8,12,11,1,0,1); sources(32,0,34); tick();
         instruction(12,16,20,1,2,3); sources(34,33,35); tick();
         decode_valid=0; squash_valid=1; cp_release_mask=1;
-        tick(); squash_valid=0; cp_release_mask=0;
-        if (decode_ready) $fatal(1,"Rename accepted during synchronous checkpoint restoration");
+        tick(); squash_valid=0; cp_release_mask=0; #1;
+        if (EAGER==0 && decode_ready) $fatal(1,"Rename accepted during synchronous checkpoint restoration");
+        if (EAGER!=0 && !decode_ready) $fatal(1,"eager checkpoint inserted a restore bubble");
         tick();
         instruction(16,20,20,1,2,4); sources(32,33,34); tick();
         instruction(20,32'h12345678,11,0,0,5); tick(); decode_valid=0;
@@ -50,6 +51,12 @@ module direct_rename_test;
             $fatal(1,"registered frontend correction missing");
         tick();
         if (front_redirect_valid) $fatal(1,"frontend correction repeated");
+        reset=1; tick(); reset=0;
+        instruction(4,8,3,0,0,2); sources(0,0,32); tick();
+        decode_valid=0; squash_valid=1; cp_release_mask=1; tick();
+        squash_valid=0; cp_release_mask=0; tick();
+        if (dut.rat[2]!=32 || dut.rat[1]!=1 || dut.free_q[32])
+            $fatal(1,"newly written checkpoint did not retain its own branch destination");
         $display("PASS direct Rename, SRAM checkpoint, branch destination and free-list recovery");
         $finish;
     end

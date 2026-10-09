@@ -1,6 +1,7 @@
 module wb_arb #(
     parameter integer PIPELINED = 0,
     parameter integer FILTER_AFTER_SELECT = 0,
+    parameter integer DEDICATED_ALU = 0,
     parameter integer ISSUE_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -61,7 +62,8 @@ module wb_arb #(
         selected_write_value = 0;
         next_cursor = cursor;
         for (int lane = 0; lane < WB_WIDTH; lane = lane + 1) begin
-            chosen = -1;
+            chosen = DEDICATED_ALU!=0 && ISSUE_WIDTH==1 && WB_WIDTH>=2 &&
+                lane==0 && source_valid[0] ? 0 : -1;
             for (int offset = 0; offset < FU_SRC_COUNT; offset = offset + 1) begin
                 // cursor and offset are each below FU_SRC_COUNT; one subtraction wraps.
                 candidate = int'(next_cursor) + offset;
@@ -82,7 +84,8 @@ module wb_arb #(
                 next_cursor = (chosen == FU_SRC_COUNT-1) ? 0 : CURSOR_BITS'(chosen + 1);
             end
         end
-        for (int i = 0; i < ISSUE_WIDTH; i = i + 1) alu_result_ready[i] = source_ready[i];
+        for (int i = 0; i < ISSUE_WIDTH; i = i + 1)
+            alu_result_ready[i] = DEDICATED_ALU!=0 && ISSUE_WIDTH==1 && WB_WIDTH>=2 ? 1'b1 : source_ready[i];
         mul_result_ready = source_ready[ISSUE_WIDTH];
         lsu_result_ready = source_ready[ISSUE_WIDTH+1];
     end

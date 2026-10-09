@@ -1,5 +1,5 @@
 module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
-    CHECK_REFILL = 0)(output reg done);
+    CHECK_REFILL = 0, HUM = 0, STOREPIPE=0)(output reg done);
     localparam integer IW = $clog2(LINE/4);
     localparam integer MB = 16+IW+32;
     reg clock = 0;
@@ -22,7 +22,11 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
     integer rh = 0, rt = 0, rc = 0, ah = 0, at = 0, ac = 0;
     integer wh = 0, wt = 0, wc = 0, bh = 0, bt = 0, bc = 0;
     integer cycles = 0, reads = 0, writes = 0, exits = 0, responses = 0;
-    integer reads_before;
+    integer reads_before, hum_hits=0, hum_retries=0;
+    always @(posedge clock) if (!reset) begin
+        if (dut.hum_probe && dut.hum_hit) hum_hits<=hum_hits+1;
+        if (dut.replay_hum) hum_retries<=hum_retries+1;
+    end
     reg ar_stalled = 0, aw_stalled = 0, w_stalled = 0;
     reg [31:0] saved_ar, saved_aw, saved_w;
     reg [3:0] saved_mask;
@@ -38,7 +42,7 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
     assign arready = rc < 16 && cycles%5 != 1;
     assign awready = ac < 16 && cycles%4 != 1;
     assign wready = wc < 16 && cycles%6 != 3;
-    dcache #(.REFILL_HITS(CHECK_REFILL), .SIZE_BYTES(SETS*WAYS*LINE), .WAYS(WAYS), .LINE_BYTES(LINE)) dut (
+    dcache #(.STORE_PIPELINE(STOREPIPE), .HIT_UNDER_MISS(HUM), .REFILL_HITS(CHECK_REFILL), .SIZE_BYTES(SETS*WAYS*LINE), .WAYS(WAYS), .LINE_BYTES(LINE)) dut (
         .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,
         .st_req_payload, .st_rsp_valid,
@@ -142,11 +146,39 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
         while (!st_rsp_valid) @(negedge clock);
         @(posedge clock);
     endtask
+    task automatic store_probe_dirty_miss;
+        // Fill all ways of set zero, then dirty replacement way zero. A
+        // pipelined Store and a miss use different word banks at one edge.
+        @(negedge clock) reset=1;
+        @(posedge clock);
+        @(negedge clock) reset=0;
+        for (integer way=0; way<WAYS; way=way+1) begin
+            load(32'((way+2)*SETS*LINE),memory[(way+2)*SETS*LINE/4],16'h9200,0);
+            while (dut.state!=0) @(negedge clock);
+        end
+        @(negedge clock);
+        st_req_valid=1; st_req_payload={32'(2*SETS*LINE),32'hcafef00d,4'hf};
+        @(posedge clock);
+        @(negedge clock);
+        st_req_valid=0; ld_req_valid=1;
+        ld_req_payload={16'h9300,2'd1,32'((WAYS+2)*SETS*LINE+4)};
+        #1;
+        if (!ld_req_ready || !dut.store_can_probe) $fatal(1,"Store/miss probe did not overlap");
+        @(posedge clock);
+        @(negedge clock) ld_req_valid=0;
+        while (!ld_rsp_valid) @(negedge clock);
+        if (ld_rsp_payload!={16'h9300,2'd1,memory[(WAYS+2)*SETS*LINE/4+1]})
+            $fatal(1,"Store/miss overlap returned wrong identity/data");
+        @(posedge clock);
+        while (dut.state!=0) @(negedge clock);
+        if (memory[2*SETS*LINE/4]!=32'hcafef00d) $fatal(1,"partial probe lost dirty victim data/tag");
+    endtask
     // Keep the next request asserted while a preceding miss fills the cache.
     // Check responses independently of acceptance, including early miss data.
     task automatic load_stream;
         reg [31:0] addresses [0:5];
-        integer sent, returned;
+        integer sent, returned, identity;
+        reg [5:0] seen;
         addresses[0] = 0;
         addresses[1] = SETS*LINE;
         addresses[2] = 0;
@@ -154,15 +186,19 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
         addresses[4] = SETS*LINE+4;
         addresses[5] = SETS*LINE+8;
         sent = 0;
-        returned = 0;
+        returned = 0; seen=0;
         @(negedge clock);
         ld_req_valid = 1;
         ld_req_payload = {16'h9000, 2'd0, addresses[0]};
         while (returned < 6) begin
             @(posedge clock);
             if (ld_rsp_valid) begin
-                if (ld_rsp_payload !== {16'(16'h9000+returned), 2'(returned),
-                                        memory[addresses[returned] >> 2]})
+                identity=int'(ld_rsp_payload[49:34])-16'h9000;
+                if (identity<0 || identity>=sent || identity>=6 || seen[identity])
+                    $fatal(1,"stream returned an unaccepted or duplicate identity");
+                seen[identity]=1;
+                if (ld_rsp_payload !== {16'(16'h9000+identity), 2'(identity),
+                                        memory[addresses[identity] >> 2]})
                     $fatal(1, "stream response changed across hit/miss SETS=%0d index=%0d",
                            SETS, returned);
                 returned = returned+1;
@@ -211,6 +247,17 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
         @(negedge clock) ld_req_valid = 0;
         @(posedge clock); #1;
         if (ld_rsp_valid || reads != reads_before) $fatal(1, "duplicate hit or unnecessary refill");
+        if (STOREPIPE!=0) begin
+            for (integer n=0; n<4; n=n+1) begin
+                @(negedge clock);
+                st_req_valid=1; st_req_payload={32'(4*n),memory[n],4'hf};
+                #1;
+                if (!st_req_ready) $fatal(1,"consecutive Store hit stalled at a different word bank");
+                @(posedge clock);
+            end
+            @(negedge clock) st_req_valid=0;
+            @(posedge clock); #1;
+        end
         store(0, 32'hdeadbeef, 15);
         store(0, 32'h0000bb00, 2);
         load(0, 32'hdeadbbef, 16'h2222, 1);
@@ -255,11 +302,23 @@ module dcache_case #(parameter integer LINE = 32, SETS = 4, WAYS = 2,
         load(0, 32'hdeadbbef, 16'h5555, 0);
         while (dut.state != 0) @(negedge clock);
         if (reads != reads_before+LINE/4) $fatal(1, "reset retained valid cache entry");
+        if (STOREPIPE!=0) begin
+            store_probe_dirty_miss();
+            load(0,memory[0],16'h9400,0);
+            while (dut.state!=0) @(negedge clock);
+        end
         load_stream();
         assoc_hit_stream();
+        if (HUM!=0 && (hum_hits==0 || hum_retries==0))
+            $fatal(1,"hit-under-miss hit/retry paths were not exercised");
         $display("PASS dcache LINE=%0d SETS=%0d WAYS=%0d", LINE, SETS, WAYS);
         done = 1;
     end
+endmodule
+module dcache_hum_test #(parameter integer LINE=64);
+    wire done;
+    dcache_case #(.LINE(LINE), .SETS(8192/LINE), .WAYS(2), .CHECK_REFILL(1), .HUM(1), .STOREPIPE(1)) c(done);
+    initial begin wait (done); $finish; end
 endmodule
 module dcache_stage2_test;
     wire done;

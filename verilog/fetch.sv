@@ -132,6 +132,18 @@ module fetch #(
             end
         end
     end
+    localparam integer OUTPUT_GROUPS=(DISPATCH_WIDTH*FETCH_BITS+15)/16;
+    for (genvar slot=0; slot<2; slot=slot+1) begin : g_output_capture
+        wire [OUTPUT_GROUPS-1:0] capture;
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(OUTPUT_GROUPS)) distribute(
+            load_output && out_tail==slot,capture);
+        for (genvar chunk=0; chunk<OUTPUT_GROUPS; chunk=chunk+1) begin : g_word
+            localparam integer OFFSET=16*chunk;
+            localparam integer BITS=(DISPATCH_WIDTH*FETCH_BITS-OFFSET>16)?16:DISPATCH_WIDTH*FETCH_BITS-OFFSET;
+            always @(posedge clock)
+                if (capture[chunk]) out_packet[slot][OFFSET +: BITS]<=ready_packet[OFFSET +: BITS];
+        end
+    end
     always @(posedge clock) begin
         if (reset || fetch_redirect_valid) begin
             head_q<=0; tail_q<=0; count_q<=0; outstanding_q<=0;
@@ -146,7 +158,7 @@ module fetch #(
             output_count<=output_count+2'(load_output)-2'(out_fire && !direct_fire);
             if (out_fire && !direct_fire) out_head<=~out_head;
             if (load_output) begin
-                out_packet[out_tail]<=ready_packet; out_count[out_tail]<=ready_count;
+                out_count[out_tail]<=ready_count;
                 out_tail<=~out_tail;
             end
             if (drain_output) head_q<=head_q+FIDW'(ready_count);

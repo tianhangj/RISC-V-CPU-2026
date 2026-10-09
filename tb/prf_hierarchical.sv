@@ -1,6 +1,6 @@
 module prf_case #(
     parameter integer SIZE = 64,
-    parameter integer BYPASS = 0,
+    parameter integer BYPASS = 0, RAM=0,
     parameter integer PW = $clog2(SIZE)
 ) (output logic done);
     logic clock = 0;
@@ -15,7 +15,7 @@ module prf_case #(
     logic [31:0] saved_nine;
     logic [31:0] expected [0:SIZE-1];
 
-    prf #(.BYPASS_WRITE(BYPASS), .ISSUE_WIDTH(2), .WB_WIDTH(2), .PRF_SIZE(SIZE)) dut (
+    prf #(.WORD_RAM(RAM), .BYPASS_WRITE(BYPASS), .ISSUE_WIDTH(2), .WB_WIDTH(2), .PRF_SIZE(SIZE)) dut (
         .clock, .reset, .rd_addr, .rd_data,
         .write_valid, .write_pdst, .write_value,
         .forward_valid(forward_only ? 2'b01 : write_valid),
@@ -121,12 +121,12 @@ module prf_case #(
     end
 endmodule
 
-module prf_hierarchical_test;
+module prf_hierarchical_test #(parameter integer RAM=0);
     wire done64, done36, bypass64, bypass36;
-    prf_case #(.SIZE(64)) case64 (.done(done64));
-    prf_case #(.SIZE(36)) case36 (.done(done36));
-    prf_case #(.SIZE(64), .BYPASS(1)) case_bypass64 (.done(bypass64));
-    prf_case #(.SIZE(36), .BYPASS(1)) case_bypass36 (.done(bypass36));
+    prf_case #(.RAM(RAM), .SIZE(64)) case64 (.done(done64));
+    prf_case #(.RAM(RAM), .SIZE(36)) case36 (.done(done36));
+    prf_case #(.RAM(RAM), .SIZE(64), .BYPASS(1)) case_bypass64 (.done(bypass64));
+    prf_case #(.RAM(RAM), .SIZE(36), .BYPASS(1)) case_bypass36 (.done(bypass36));
     initial begin
         wait (done64 && done36 && bypass64 && bypass36);
         $display("prf hierarchical PASS");

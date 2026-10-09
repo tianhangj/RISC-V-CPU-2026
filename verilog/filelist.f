@@ -5,6 +5,8 @@
 # core.sv
 signal_fanout.sv
 pc_increment.sv
+word_adder.sv
+word_compare.sv
 decode.sv
 alu.sv
 mul_div.sv

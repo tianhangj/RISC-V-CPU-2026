@@ -2,6 +2,7 @@ module rob #(
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
+    parameter integer EARLY_STORE_COMMIT = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 64,
     parameter integer SQ_DEPTH = 8,
@@ -49,6 +50,14 @@ module rob #(
     always_comb begin
         keep_count = count_q;
         if (squash_valid) keep_count = {1'b0, (squash_tag - head_q)} + 1'b1;
+        st_start_valid = 0;
+        st_start_id = alloc[head_q][SIDW-1:0];
+        head_completed = completed[head_q];
+        for (int w = 0; w < WB_WIDTH; w = w + 1)
+            if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
+                head_completed = 1;
+        if (count_q != 0 && alloc[head_q][SIDW +: 2] == 2'd3 &&
+            head_completed && !store_started[head_q]) st_start_valid = 1;
         retire_count = 0;
         stop_retire = 0;
         reg_commit_valid = 0;
@@ -58,7 +67,9 @@ module rob #(
             if (!stop_retire && lane < keep_count) begin
                 if (alloc[slot][SIDW +: 2] == 2'd3) begin
                     if (lane == 0 && (store_responded[slot] ||
-                        (store_started[slot] && st_done_valid))) retire_count = retire_count + 1'b1;
+                        (store_started[slot] && st_done_valid) ||
+                        (EARLY_STORE_COMMIT!=0 && st_start_valid && st_done_valid)))
+                        retire_count = retire_count + 1'b1;
                     else stop_retire = 1;
                 end else if (completed[slot]) begin
                     retire_count = retire_count + 1'b1;
@@ -68,16 +79,6 @@ module rob #(
                     end
                 end else stop_retire = 1;
             end
-        end
-        st_start_valid = 0;
-        st_start_id = alloc[head_q][SIDW-1:0];
-        head_completed = completed[head_q];
-        for (int w = 0; w < WB_WIDTH; w = w + 1)
-            if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
-                head_completed = 1;
-        if (count_q != 0 && alloc[head_q][SIDW +: 2] == 2'd3 &&
-            head_completed && !store_started[head_q]) begin
-            st_start_valid = 1;
         end
     end
 

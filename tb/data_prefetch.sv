@@ -1,4 +1,4 @@
-module data_prefetch_test;
+module data_prefetch_test #(parameter integer TARGETED=0);
     reg clock=0; always #5 clock=~clock;
     reg reset=1, dc_req_valid=0, mem_rsp_valid=0, write_fire=0, line_req_valid=0;
     reg [49:0] dc_req_payload=0;
@@ -9,10 +9,11 @@ module data_prefetch_test;
     wire [127:0] line_rsp_data;
     reg [51:0] captured [0:31];
     integer count=0;
-    data_prefetch #(.LINE_BYTES(16)) dut (
+    reg [31:0] write_addr=32;
+    data_prefetch #(.TARGETED_INVALIDATE(TARGETED), .LINE_BYTES(16)) dut (
         .clock, .reset, .dc_req_valid, .dc_req_ready, .dc_req_payload,
         .dc_rsp_valid, .dc_rsp_payload, .mem_req_valid, .mem_req_ready(1'b1),
-        .mem_req_payload, .mem_rsp_valid, .mem_rsp_payload, .write_fire,
+        .mem_req_payload, .mem_rsp_valid, .mem_rsp_payload, .write_fire, .write_addr,
         .line_req_valid, .line_req_ready, .line_rsp_valid, .line_rsp_data);
     always @(posedge clock)
         if (!reset && mem_req_valid) begin
@@ -60,8 +61,14 @@ module data_prefetch_test;
         if (!dc_rsp_valid || dc_rsp_payload!=={16'd3,2'd2,32'ha0000018})
             $fatal(1,"SRAM response was lost during arbitration backpressure: valid=%b data=%h pending=%b held=%b held_data=%h",dc_rsp_valid,dc_rsp_payload,dut.buffer_pending,dut.buffer_held,dut.held_data);
         tick();
+        if (TARGETED!=0) begin
+            write_addr=64; write_fire=1; tick(); write_fire=0;
+            dc_req_payload={16'd9,2'd0,32'd16}; line_req_valid=1; #1;
+            if (!line_req_ready) $fatal(1,"unrelated writeback invalidated a useful snapshot");
+            tick(); line_req_valid=0; tick();
+        end
         while (count<9) tick();
-        write_fire=1; tick(); write_fire=0;
+        write_addr=32; write_fire=1; tick(); write_fire=0;
         for (integer i=5; i<9; i=i+1) response(captured[i],32'hbad00000+32'(i));
         dc_req_payload={16'd4,2'd0,32'd32}; dc_req_valid=1;
         #1;

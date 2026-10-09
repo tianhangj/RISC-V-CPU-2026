@@ -2,6 +2,7 @@
 // SRAM holds their words until a later blocking-cache refill requests them.
 module data_prefetch #(
     parameter integer LINE_BYTES=128, GEN_WIDTH=16, SLOTS=3,
+    parameter integer TARGETED_INVALIDATE=0,
     parameter integer WORDS=LINE_BYTES/4, WORD_W=$clog2(WORDS),
     parameter integer OFFSET_W=$clog2(LINE_BYTES), SLOT_W=$clog2(SLOTS+1),
     parameter integer DC_BITS=GEN_WIDTH+WORD_W+32,
@@ -17,7 +18,8 @@ module data_prefetch #(
     input wire line_req_valid, output wire line_req_ready,
     output reg line_rsp_valid,
     output wire [LINE_BYTES*8-1:0] line_rsp_data,
-    input wire write_fire
+    input wire write_fire,
+    input wire [31:0] write_addr
 );
     reg [SLOTS-1:0] valid, busy, dropped;
     reg [31:OFFSET_W] line_tag [0:SLOTS-1];
@@ -89,8 +91,14 @@ module data_prefetch #(
     wire [SLOTS*WRITE_GROUPS*32-1:0] write_data;
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(32), .BRANCHES(SLOTS*WRITE_GROUPS))
         distribute_write_data(mem_rsp_payload[31:0],write_data);
+    wire [SLOTS*8*WORD_W-1:0] buffer_word_select;
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(SLOTS*8))
+        distribute_buffer_word(dc_buffer_word,buffer_word_select);
     for (genvar slot=0; slot<SLOTS; slot=slot+1) begin : g_buffer
-        assign ram_data[slot*32 +: 32]=ram_lines[slot*LINE_BYTES*8+32*dc_buffer_word +: 32];
+        for (genvar part=0; part<8; part=part+1) begin : g_buffer_read
+            wire [WORD_W-1:0] selected_word=buffer_word_select[(slot*8+part)*WORD_W +: WORD_W];
+            assign ram_data[slot*32+part*4 +: 4]=ram_lines[slot*LINE_BYTES*8+32*selected_word+part*4 +: 4];
+        end
         for (genvar word=0; word<WORDS; word=word+1) begin : g_word
             wire store=prefetch_response && rsp_slot==SLOT_W'(slot+1) && rsp_word==WORD_W'(word);
             wire load=(hit_fire && hit_slot==slot && dc_word==WORD_W'(word)) || (line_fire && hit_slot==slot);
@@ -135,7 +143,11 @@ module data_prefetch #(
             // Drain old speculative reads before reusing their slot IDs.
             // A writeback invalidates prefetched memory snapshots, including
             // reads still in flight, before any later cache refill can use them.
-            if (write_fire) begin valid<=0; dropped<=busy; end
+            if (write_fire)
+                for (integer slot=0; slot<SLOTS; slot=slot+1)
+                    if (TARGETED_INVALIDATE==0 || line_tag[slot]==write_addr[31:OFFSET_W]) begin
+                        valid[slot]<=0; dropped[slot]<=busy[slot];
+                    end
         end
     end
 endmodule

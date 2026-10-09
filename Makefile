@@ -19,7 +19,7 @@ TESTCASES ?= $(FRAMEWORK_DIR)/testcases
 BUILD ?= build
 SYNTH_OUT ?= $(BUILD)/synth
 MODE ?= opt
-CLOCK_PERIOD_NS ?= 3.333
+CLOCK_PERIOD_NS ?= 5.0
 FILELIST ?= verilog/filelist.f
 PROGRAM ?= program.bin
 EXPECTED ?=
@@ -60,7 +60,7 @@ help:
 	@echo 'make branch-accuracy [Case=perf_qsort BP_WIDTH=1 BP_ENABLE=1 BP_MAX_CYCLES=100000000]'
 	@echo '  CSV/JSON and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
-	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=3.333 FILELIST=verilog/filelist.f]'
+	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=5.0 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
 	@echo 'make clean  (removes BUILD, SYNTH_OUT and code)'
 	@echo 'make / make code: compile RTL and produce ./code for OJ'

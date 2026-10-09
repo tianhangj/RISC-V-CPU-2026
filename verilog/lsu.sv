@@ -2,6 +2,11 @@ module lsu #(
     parameter integer PIPELINED = 1,
     parameter integer RESULT_PIPELINED = PIPELINED,
     parameter integer BUFFER_STORES = 0,
+    parameter integer STORE_FORWARD = 0,
+    parameter integer RESPONSE_FIRST = 0,
+    parameter integer REGISTER_STORE_RESULT = 0, STORE_LOOKAHEAD = 0,
+    parameter integer BYPASS_STORE_RESULTS = 0, SPEC_READ_PREVIEW = 0,
+    parameter integer EARLY_STORE_COMMIT = 0,
     parameter integer EARLY_STORE = 0, EARLY_LOAD = 0, FORWARD_WIDTH=3,
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -41,6 +46,7 @@ module lsu #(
     input wire [FORWARD_WIDTH*PW-1:0] forward_pdst,
     input wire [FORWARD_WIDTH*32-1:0] forward_value,
     input logic exec_valid,
+    input wire read_exec_valid,
     output logic exec_ready,
     input logic [MEM_EXEC_BITS-1:0] exec_payload,
     output wire early_load_valid,
@@ -67,8 +73,9 @@ module lsu #(
     logic [SQ_DEPTH-1:0] sq_committed, sq_data_ready;
     reg [PW-1:0] sq_psrc [0:SQ_DEPTH-1];
     reg [SIDW-1:0] commit_fifo [0:SQ_DEPTH-1];
-    reg [SIDW-1:0] commit_head, commit_tail;
-    reg [SQ_CW-1:0] commit_count;
+    (* keep *) reg [SIDW-1:0] commit_head, commit_tail;
+    reg [SIDW-1:0] sq_commit_ticket [0:SQ_DEPTH-1];
+    (* keep *) reg [SQ_CW-1:0] commit_count;
     reg commit_ack;
     logic [2:0] lq_state [0:LQ_DEPTH-1]; // 0 waiting AGU, 1 addr, 2 R, 3 data, 4 result queued
     logic [TAG_BITS-1:0] lq_rob [0:LQ_DEPTH-1], sq_rob [0:SQ_DEPTH-1];
@@ -103,22 +110,52 @@ module lsu #(
     wire [TAG_BITS-1:0] exec_rob = exec_payload[MEM_EXEC_BITS-1 -: TAG_BITS];
     wire [2:0] exec_op = exec_payload[96+MIDW +: 3];
     wire [MIDW-1:0] exec_id = exec_payload[96 +: MIDW];
-    wire [31:0] exec_addr = exec_payload[95:64] + exec_payload[63:32];
+    (* keep *) wire [31:0] exec_addr;
+    (* keep_hierarchy, keep *) word_adder address_adder(
+        .a(exec_payload[95:64]), .b(exec_payload[63:32]), .carry_in(1'b0), .sum(exec_addr));
     wire [2*LQ_DEPTH-1:0] exec_ram_control;
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2*LQ_DEPTH))
         distribute_exec_ram(exec_addr[31:28]==0,exec_ram_control);
     wire [31:0] exec_data = exec_payload[31:0];
-    wire store_executing = exec_valid && exec_op >= 5 &&
-        exec_id[SIDW-1:0] == active_write_id;
-    wire [31:0] write_addr = store_executing ? exec_addr : sq_addr[active_write_id];
-    wire [31:0] write_data = store_executing ? exec_data : sq_data[active_write_id];
-    wire [2:0] write_op = store_executing ? exec_op : sq_op[active_write_id];
+    wire next_write=STORE_LOOKAHEAD!=0 && BUFFER_STORES!=0 && write_complete && commit_count>1;
+    wire [SIDW-1:0] offer_write_id=next_write ? commit_fifo[SIDW'(commit_head+1'b1)] : active_write_id;
+    (* keep *) wire store_executing = BUFFER_STORES==0 && exec_valid && exec_op >= 5 &&
+        exec_id[SIDW-1:0] == offer_write_id;
+    wire [31:0] write_addr = store_executing ? exec_addr : sq_addr[offer_write_id];
+    wire [31:0] write_data = store_executing ? exec_data : sq_data[offer_write_id];
+    wire [2:0] write_op = store_executing ? exec_op : sq_op[offer_write_id];
     wire [LIDW-1:0] rsp_id = ld_rsp_payload[32 +: LIDW];
     wire [GEN_WIDTH-1:0] rsp_gen = ld_rsp_payload[32+LIDW +: GEN_WIDTH];
+    wire request_executing=SPEC_READ_PREVIEW!=0?read_exec_valid:exec_valid;
     wire req_fire = ld_req_valid && ld_req_ready;
     wire result_fire = result_valid && result_ready;
-    wire response_matches = ld_rsp_valid && lq_valid[rsp_id] &&
-        lq_state[rsp_id] == 2 && lq_gen[rsp_id] == rsp_gen;
+    wire [LQ_DEPTH-1:0] response_slot;
+    wire [2*LQ_DEPTH-1:0] response_identity_select;
+    wire [TAG_BITS-1:0] response_tags [0:LQ_DEPTH-1];
+    wire [PW-1:0] response_destinations [0:LQ_DEPTH-1];
+    reg [TAG_BITS-1:0] response_tag;
+    reg [PW-1:0] response_pdst;
+    for (genvar slot=0; slot<LQ_DEPTH; slot=slot+1) begin : g_response_identity
+        assign response_slot[slot]=ld_rsp_valid && rsp_id==LIDW'(slot) &&
+            lq_valid[slot] && lq_state[slot]==2 && lq_gen[slot]==rsp_gen;
+        (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2)) distribute_identity(
+            response_slot[slot],response_identity_select[2*slot +: 2]);
+        assign response_tags[slot]=lq_rob[slot] & {TAG_BITS{response_identity_select[2*slot]}};
+        assign response_destinations[slot]=lq_pdst[slot] & {PW{response_identity_select[2*slot+1]}};
+    end
+    always @* begin
+        response_tag=0; response_pdst=0;
+        for (integer slot=0; slot<LQ_DEPTH; slot=slot+1) begin
+            response_tag=response_tag | response_tags[slot];
+            response_pdst=response_pdst | response_destinations[slot];
+        end
+    end
+    (* keep *) wire response_matches=|response_slot;
+    wire response_priority=RESPONSE_FIRST!=0 && response_matches;
+    wire [3:0] response_choice;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4))
+        distribute_response_choice(response_priority,response_choice);
+    wire [31:0] response_value=load_extend(lq_op[rsp_id],lq_addr[rsp_id][1:0],ld_rsp_payload[31:0]);
     wire selected_survives = !squash_valid ||
         RW'(selected_result[RESULT_BITS-1 -: TAG_BITS]-rob_head) <= RW'(squash_tag-rob_head);
 
@@ -177,31 +214,65 @@ module lsu #(
     reg load_tree_valid [1:2*LOAD_LEAVES-1];
     reg [RW-1:0] load_tree_age [1:2*LOAD_LEAVES-1];
     reg [LIDW-1:0] load_tree_id [1:2*LOAD_LEAVES-1];
+    localparam integer STORE_AGE_W=(RW>SIDW)?RW:SIDW;
+    reg [LQ_DEPTH-1:0] load_forward_valid;
+    reg [SIDW-1:0] load_forward_id [0:LQ_DEPTH-1];
+    reg overlapping_store, unknown_store;
+    reg [STORE_AGE_W:0] newest_store_age, store_age;
+    reg [SIDW-1:0] newest_store;
+    reg [3:0] load_mask, store_mask;
+    wire forward_load=STORE_FORWARD!=0 && chosen_load>=0 && load_forward_valid[LIDW'(chosen_load)];
     localparam integer RESULT_ID_W=$clog2(LQ_DEPTH+SQ_DEPTH);
     reg result_tree_valid [1:2*RESULT_LEAVES-1];
     reg [RW-1:0] result_tree_age [1:2*RESULT_LEAVES-1];
     reg [RESULT_ID_W-1:0] result_tree_id [1:2*RESULT_LEAVES-1];
     always_comb begin
+        load_forward_valid=0;
+        overlapping_store=0; unknown_store=0; newest_store_age=0; store_age=0;
+        newest_store=0; load_mask=0; store_mask=0;
+        for (int l=0; l<LQ_DEPTH; l=l+1) load_forward_id[l]=0;
         for (int l=0; l<LOAD_LEAVES; l=l+1) begin
             load_tree_valid[LOAD_LEAVES+l]=0;
             load_tree_age[LOAD_LEAVES+l]=0;
             load_tree_id[LOAD_LEAVES+l]=LIDW'(l);
             if (l<LQ_DEPTH) begin
-                load_executing=exec_valid && exec_op<5 &&
+                load_executing=request_executing && exec_op<5 &&
                     exec_id[LIDW-1:0]==LIDW'(l) && lq_state[l]==0 && exec_ram_control[2*l];
                 candidate_addr=load_executing?exec_addr:lq_addr[l];
                 candidate_op=load_executing?exec_op:lq_op[l];
                 load_blocked=0;
-                for (int st=0; st<SQ_DEPTH; st=st+1)
-                    if (sq_valid[st] && (sq_committed[st] || RW'(sq_rob[st]-rob_head)<RW'(lq_rob[l]-rob_head)) &&
-                        (!sq_addr_ready[st] ||
-                         (sq_addr[st][31:2]==candidate_addr[31:2] &&
-                          (byte_mask(sq_op[st],sq_addr[st][1:0]) &
-                           byte_mask(candidate_op,candidate_addr[1:0]))!=0))) load_blocked=1;
+                overlapping_store=0; unknown_store=0; newest_store_age=0; newest_store=0;
+                load_mask=byte_mask(candidate_op,candidate_addr[1:0]);
+                for (int st=0; st<SQ_DEPTH; st=st+1) begin
+                    // Committed Stores precede every live ROB entry. Their
+                    // FIFO position remains ordered even after ROB tag reuse.
+                    store_age={1'b1,STORE_AGE_W'(RW'(sq_rob[st]-rob_head))};
+                    if (sq_committed[st]) begin
+                        // The FIFO slot is a ticket while this Store remains
+                        // committed. Modular distance from its head gives the
+                        // rank without searching every FIFO slot for each Load.
+                        store_age=STORE_AGE_W'(SIDW'(sq_commit_ticket[st]-commit_head));
+                    end
+                    if (sq_valid[st] && (sq_committed[st] || RW'(sq_rob[st]-rob_head)<RW'(lq_rob[l]-rob_head))) begin
+                        if (!sq_addr_ready[st]) begin load_blocked=1; unknown_store=1; end
+                        else if (sq_addr[st][31:2]==candidate_addr[31:2] &&
+                            (byte_mask(sq_op[st],sq_addr[st][1:0]) & load_mask)!=0) begin
+                            load_blocked=1;
+                            if (!overlapping_store || store_age>newest_store_age) begin
+                                overlapping_store=1; newest_store_age=store_age; newest_store=SIDW'(st);
+                            end
+                        end
+                    end
+                end
+                store_mask=byte_mask(sq_op[newest_store],sq_addr[newest_store][1:0]);
+                load_forward_valid[l]=STORE_FORWARD!=0 && lq_state[l]==1 &&
+                    overlapping_store && !unknown_store && sq_data_ready[newest_store] &&
+                    (store_mask & load_mask)==load_mask && candidate_addr[31:28]==0;
+                load_forward_id[l]=newest_store;
                 load_tree_valid[LOAD_LEAVES+l]=lq_valid[l] &&
-                    (lq_state[l]==1 || load_executing) && !load_blocked &&
+                    (lq_state[l]==1 || load_executing) && (!load_blocked || load_forward_valid[l]) &&
                     !(offer_valid && offer_id==LIDW'(l)) &&
-                    (!squash_valid || RW'(lq_rob[l]-rob_head)<=RW'(squash_tag-rob_head));
+                    (SPEC_READ_PREVIEW!=0 || !squash_valid || RW'(lq_rob[l]-rob_head)<=RW'(squash_tag-rob_head));
                 load_tree_age[LOAD_LEAVES+l]=lq_rob[l]-rob_head;
             end
         end
@@ -216,20 +287,22 @@ module lsu #(
             end
         end
         chosen_load=load_tree_valid[1]?int'(load_tree_id[1]):-1;
+    end
+    always_comb begin
         for (int leaf=0; leaf<RESULT_LEAVES; leaf=leaf+1) begin
             result_tree_valid[RESULT_LEAVES+leaf]=0;
             result_tree_age[RESULT_LEAVES+leaf]=0;
             result_tree_id[RESULT_LEAVES+leaf]=RESULT_ID_W'(leaf);
             if (leaf<LQ_DEPTH) begin
                 result_tree_valid[RESULT_LEAVES+leaf]=lq_valid[leaf] &&
-                    (lq_state[leaf]==3 || (response_matches && rsp_id==LIDW'(leaf)));
+                    (lq_state[leaf]==3 || (RESPONSE_FIRST==0 && response_matches && rsp_id==LIDW'(leaf)));
                 result_tree_age[RESULT_LEAVES+leaf]=lq_rob[leaf]-rob_head;
             end else if (leaf<LQ_DEPTH+SQ_DEPTH) begin
                 result_tree_valid[RESULT_LEAVES+leaf]=sq_valid[leaf-LQ_DEPTH] &&
-                    (sq_addr_ready[leaf-LQ_DEPTH] ||
-                     (exec_valid && exec_op>=5 && exec_id[SIDW-1:0]==SIDW'(leaf-LQ_DEPTH))) &&
+                    (sq_addr_ready[leaf-LQ_DEPTH] || (REGISTER_STORE_RESULT==0 &&
+                     (exec_valid && exec_op>=5 && exec_id[SIDW-1:0]==SIDW'(leaf-LQ_DEPTH)))) &&
                     (EARLY_STORE==0 || sq_data_ready[leaf-LQ_DEPTH] ||
-                     (exec_valid && exec_op>=5 && exec_id[SIDW-1:0]==SIDW'(leaf-LQ_DEPTH) && store_data_valid)) &&
+                     (REGISTER_STORE_RESULT==0 && exec_valid && exec_op>=5 && exec_id[SIDW-1:0]==SIDW'(leaf-LQ_DEPTH) && store_data_valid)) &&
                     !sq_reported[leaf-LQ_DEPTH];
                 result_tree_age[RESULT_LEAVES+leaf]=sq_rob[leaf-LQ_DEPTH]-rob_head;
             end
@@ -247,41 +320,57 @@ module lsu #(
         result_is_store=int'(result_tree_id[1])>=LQ_DEPTH;
         chosen_result=result_tree_valid[1]?
             (result_is_store?int'(result_tree_id[1])-LQ_DEPTH:int'(result_tree_id[1])):-1;
-        selected_result = 0;
-        if (chosen_result >= 0) begin
-            if (result_is_store)
-                selected_result = {sq_rob[chosen_result], {PW{1'b0}}, 32'b0};
-            else
-                selected_result = {lq_rob[chosen_result], lq_pdst[chosen_result],
-                    (response_matches && rsp_id == LIDW'(chosen_result)) ?
-                    load_extend(lq_op[chosen_result], lq_addr[chosen_result][1:0],
-                        ld_rsp_payload[31:0]) : lq_data[chosen_result]};
+        if (RESPONSE_FIRST!=0 && response_matches) begin
+            chosen_result=int'(rsp_id); result_is_store=0;
         end
+        // Ready queue selection is independent of current response identity.
+        // RESPONSE_FIRST bypasses its index/age tree for every payload field.
+        selected_result = 0;
+        if (result_tree_valid[1]) begin
+            if (int'(result_tree_id[1])>=LQ_DEPTH)
+                selected_result={sq_rob[int'(result_tree_id[1])-LQ_DEPTH],{PW{1'b0}},32'b0};
+            else
+                selected_result={lq_rob[LIDW'(result_tree_id[1])],lq_pdst[LIDW'(result_tree_id[1])],
+                    (RESPONSE_FIRST==0 && response_matches && rsp_id==LIDW'(result_tree_id[1]))?
+                    response_value:lq_data[LIDW'(result_tree_id[1])]};
+        end
+        if (response_choice[0]) selected_result[0 +: 16]=response_value[0 +: 16];
+        if (response_choice[1]) selected_result[16 +: 16]=response_value[16 +: 16];
+        if (response_choice[2]) selected_result[32 +: PW]=response_pdst;
+        if (response_choice[3]) selected_result[32+PW +: TAG_BITS]=response_tag;
     end
+    // Incoming responses have an independent identity path. In this mode
+    // the selector guarantees the response a registered result slot.
     assign early_load_valid=EARLY_LOAD!=0 && (!result_busy || result_ready) &&
-        chosen_result>=0 && !result_is_store;
-    assign early_load_pdst=selected_result[32 +: PW];
+        (RESPONSE_FIRST!=0 && response_matches ? 1'b1 : chosen_result>=0 && !result_is_store);
+    assign early_load_pdst=RESPONSE_FIRST!=0 && response_matches ? lq_pdst[rsp_id] : selected_result[32 +: PW];
     assign exec_ready = 1'b1;
-    assign result_valid = result_busy || (RESULT_PIPELINED == 0 && chosen_result >= 0);
-    assign result_payload = (RESULT_PIPELINED == 0 && !result_busy) ? selected_result : result_q;
+    wire bypass_store_result=BYPASS_STORE_RESULTS!=0 && result_is_store && chosen_result>=0;
+    assign result_valid = result_busy ||
+        (RESULT_PIPELINED==0 && (response_priority || result_tree_valid[1])) || bypass_store_result;
+    // Empty-buffer Store completion has no physical destination or value.
+    // Keep current Cache selection out of the nonzero forwarding identities.
+    assign result_payload = !result_busy ? (RESULT_PIPELINED==0 ? selected_result :
+        BYPASS_STORE_RESULTS!=0 ? {selected_result[RESULT_BITS-1 -: TAG_BITS],{PW{1'b0}},32'b0} : result_q) : result_q;
     // Offers address RAM only. A read accepted on the squash edge is harmless:
     // its original generation still identifies the later, discarded response.
     // The single-issue path bypasses an empty request buffer. If the cache or
     // read credits stall it, the selected address/gen/id are held from the edge.
-    assign ld_req_valid = (offer_valid || (PIPELINED == 0 && chosen_load >= 0)) &&
+    assign ld_req_valid = (offer_valid || (PIPELINED == 0 && chosen_load >= 0 && !forward_load)) &&
         outstanding_q < LOAD_OUTSTANDING;
     assign ld_req_payload = {request_gen, request_id,
-        ((!offer_valid && exec_valid && exec_op < 5 &&
+        ((!offer_valid && request_executing && exec_op < 5 &&
           exec_id[LIDW-1:0] == request_id && lq_state[request_id] == 0) ?
          exec_addr : lq_addr[request_id]) & 32'hfffffffc};
     // ROB authorization already identifies a completed, non-speculative Store.
     // Send it immediately; write_id/write_sent retain the offer if the cache
     // applies backpressure or until its response arrives.
-    assign st_req_valid = (BUFFER_STORES != 0 ? commit_count!=0 : (write_active || st_start_valid)) && !write_sent;
+    assign st_req_valid = (BUFFER_STORES != 0 ? commit_count!=0 : (write_active || st_start_valid)) && (!write_sent || next_write);
     assign st_req_payload = {write_addr & 32'hfffffffc,
         write_data << (8*write_addr[1:0]), byte_mask(write_op, write_addr[1:0])};
     assign st_done_valid = BUFFER_STORES != 0 ?
-        (commit_ack || (write_complete && sq_addr[active_write_id][31:28]!=0)) : write_complete;
+        ((EARLY_STORE_COMMIT!=0 ? (st_start_valid && sq_addr[st_start_id][31:28]==0) : commit_ack) ||
+         (write_complete && sq_addr[active_write_id][31:28]!=0)) : write_complete;
 
     always_ff @(posedge clock) begin
         if (reset) begin
@@ -309,13 +398,19 @@ module lsu #(
             if (offer_valid && squash_valid &&
                 (lq_rob[offer_id]-rob_head) > (squash_tag-rob_head)) offer_valid <= 0;
             else if (!offer_valid || req_fire) begin
-                offer_valid <= chosen_load >= 0 &&
-                    (PIPELINED != 0 || offer_valid || !req_fire);
+                offer_valid <= chosen_load >= 0 && !forward_load &&
+                    (PIPELINED != 0 || offer_valid || !req_fire) &&
+                    (!squash_valid || RW'(lq_rob[chosen_load]-rob_head)<=RW'(squash_tag-rob_head));
                 if (chosen_load >= 0) begin
                     offer_id <= chosen_load;
                     offer_gen <= current_gen;
                     lq_gen[chosen_load] <= current_gen;
                 end
+            end
+            if (forward_load) begin
+                lq_data[chosen_load]<=load_extend(lq_op[chosen_load],lq_addr[chosen_load][1:0],
+                    sq_data[load_forward_id[chosen_load]] << (8*sq_addr[load_forward_id[chosen_load]][1:0]));
+                lq_state[chosen_load]<=3;
             end
             if (result_busy && (result_fire ||
                 (squash_valid &&
@@ -328,6 +423,7 @@ module lsu #(
                 commit_count<=commit_count+SQ_CW'(st_start_valid)-SQ_CW'(write_complete);
                 if (st_start_valid) begin
                     commit_fifo[commit_tail]<=st_start_id;
+                    sq_commit_ticket[st_start_id]<=commit_tail;
                     commit_tail<=SIDW'((int'(commit_tail)+1)%SQ_DEPTH);
                     sq_committed[st_start_id]<=1;
                     // RAM writes retire once owned by the committed queue.
@@ -347,7 +443,7 @@ module lsu #(
             if (write_complete) begin
                 sq_valid[active_write_id] <= 0;
                 write_active <= 0;
-                write_sent <= 0;
+                write_sent <= next_write && st_req_valid && st_req_ready;
             end
             if (EARLY_STORE!=0)
                 for (int st=0; st<SQ_DEPTH; st=st+1)
@@ -379,15 +475,14 @@ module lsu #(
                 lq_state[request_id] <= 2;
                 lq_gen[request_id] <= request_gen;
             end
-            // The oldest completion is prepared independently of recovery.
-            // WB discards a younger same-edge offer; it must never be retained
-            // here after squash. If the oldest is young, all other candidates
-            // are young too, so filtering once preserves the selection order.
+            // Prepare completion independently of recovery; never retain a
+            // cancelled response. RESPONSE_FIRST may defer an older ready
+            // entry for one cycle when a younger response is cancelled.
             if ((!result_busy || result_fire) && chosen_result >= 0 && selected_survives) begin
                 // Empty-buffer bypass consumes the selected result now. With
                 // WB backpressure, or when replacing an older buffered result,
                 // capture it instead. Unselected responses remain in the LQ.
-                result_busy <= RESULT_PIPELINED != 0 || result_busy || !result_ready;
+                result_busy <= (RESULT_PIPELINED!=0 && !bypass_store_result) || result_busy || !result_ready;
                 result_q <= selected_result;
                 if (result_is_store) begin
                     result_load <= 0;

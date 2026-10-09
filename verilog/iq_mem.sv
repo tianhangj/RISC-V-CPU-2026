@@ -1,5 +1,6 @@
 module iq_mem #(
     parameter integer PIPELINED = 1,
+    parameter integer ORDERED_SELECT = 0,
     parameter integer EARLY_STORE = 0,
     parameter integer DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_MEM_DEPTH = 16,
@@ -38,7 +39,7 @@ module iq_mem #(
     iq_core #(.ISSUE_WIDTH(1), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32),
-        .BYPASS_WAKE(1), .EARLY_STORE(EARLY_STORE), .STORE_OP_LSB(32+2*PW+MIDW), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
+        .BYPASS_WAKE(1), .ORDERED_SELECT(ORDERED_SELECT), .EARLY_STORE(EARLY_STORE), .STORE_OP_LSB(32+2*PW+MIDW), .RW(RW), .PW(PW), .CW(MIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
         .wake_valid, .wake_pdst, .free_count(mem_iq_free),

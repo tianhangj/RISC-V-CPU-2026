@@ -8,6 +8,7 @@ module iq_core #(
     parameter integer UOP_BITS = 95,
     parameter integer SRC2_LSB = 64,
     parameter integer BYPASS_WAKE = 0,
+    parameter integer ORDERED_SELECT = 0,
     parameter integer EARLY_STORE = 0,
     parameter integer STORE_OP_LSB = SRC2_LSB+2*PW,
     parameter integer RW = $clog2(ROB_DEPTH),
@@ -35,6 +36,31 @@ module iq_core #(
     end
     localparam integer TREE_LEAVES = 2 ** $clog2(DEPTH);
     localparam integer SLOT_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;
+    // Record age when entries arrive. Ready selection no longer subtracts
+    // ROB head and carries age values through a comparator tree.
+    reg [DEPTH-1:0] older [0:DEPTH-1];
+    wire [DEPTH*DEPTH-1:0] older_flat;
+    for (genvar s=0; s<DEPTH; s=s+1) begin : g_flat_age
+        assign older_flat[s*DEPTH +: DEPTH]=older[s];
+    end
+    generate if (ORDERED_SELECT!=0 && ISSUE_WIDTH==1) begin : g_order
+        always @(posedge clock) begin
+            if (reset) begin
+                for (integer s=0; s<DEPTH; s=s+1) older[s]<=0;
+            end else if (!squash_valid) begin
+                for (integer lane=0; lane<DISPATCH_WIDTH; lane=lane+1)
+                    for (integer s=0; s<DEPTH; s=s+1)
+                        if (disp_valid[lane] && alloc_select[lane][s]) begin
+                            for (integer t=0; t<DEPTH; t=t+1) begin
+                                older[s][t]<=valid_q[t];
+                                older[t][s]<=0;
+                                for (integer prev=0; prev<lane; prev=prev+1)
+                                    if (disp_valid[prev] && alloc_select[prev][t]) older[s][t]<=1;
+                            end
+                        end
+            end
+        end
+    end endgenerate
     logic [DEPTH-1:0] candidate_used;
     logic [DEPTH-1:0] alloc_select [0:DISPATCH_WIDTH-1];
     logic [CW-1:0] free_rank [0:DEPTH-1];
@@ -61,7 +87,7 @@ module iq_core #(
     logic select_ready1, select_ready2;
     logic w1, w2;
     always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_prepare or
-             wake_valid or wake_pdst) begin
+             wake_valid or wake_pdst or older_flat) begin
         for (int s = 0; s < DEPTH; s = s + 1) begin
             slot_age[s] = entry[s][UOP_BITS-1 -: RW] - rob_head;
             select_ps1 = entry[s][SRC2_LSB+PW +: PW];
@@ -88,6 +114,13 @@ module iq_core #(
         cand_valid = 0; cand_src2_ready=0;
         for (int lane = 0; lane < ISSUE_WIDTH; lane = lane + 1) begin
             cand_select[lane] = 0;
+            if (ORDERED_SELECT!=0 && ISSUE_WIDTH==1) begin
+                cand_valid[lane]=|ready_candidate;
+                for (int s=0; s<DEPTH; s=s+1) begin
+                    cand_select[lane][s]=ready_candidate[s] && !(|(older[s] & ready_candidate));
+                    if (cand_select[lane][s]) cand_src2_ready[lane]=data_ready[s];
+                end
+            end else begin
             for (int leaf = 0; leaf < TREE_LEAVES; leaf = leaf + 1) begin
                 tree_valid[lane][TREE_LEAVES+leaf] =
                     (leaf < DEPTH) ? ready_candidate[leaf] && !candidate_used[leaf] : 1'b0;
@@ -112,6 +145,7 @@ module iq_core #(
             for (int s = 0; s < DEPTH; s = s + 1) begin
                 cand_select[lane][s] = tree_valid[lane][1] && tree_slot[lane][1] == SLOT_W'(s);
                 if (cand_select[lane][s]) cand_src2_ready[lane]=data_ready[s];
+            end
             end
             candidate_used |= cand_select[lane];
         end
@@ -199,6 +233,7 @@ endmodule
 
 module iq_alu #(
     parameter integer PIPELINED = 1,
+    parameter integer ORDERED_SELECT = 0,
     parameter integer ISSUE_WIDTH = 2, DISPATCH_WIDTH = 2, WB_WIDTH = 2,
     parameter integer ROB_DEPTH = 32, PRF_SIZE = 64, IQ_ALU_DEPTH = 16,
     parameter integer CHECKPOINT_DEPTH = 4,
@@ -233,7 +268,7 @@ module iq_alu #(
     iq_core #(.ISSUE_WIDTH(ISSUE_WIDTH), .DISPATCH_WIDTH(DISPATCH_WIDTH),
         .WB_WIDTH(WB_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE),
         .DEPTH(IQ_ALU_DEPTH), .UOP_BITS(ALU_IQ_BITS), .SRC2_LSB(64),
-        .BYPASS_WAKE(1),
+        .BYPASS_WAKE(1), .ORDERED_SELECT(ORDERED_SELECT),
         .RW(RW), .PW(PW), .CW(AIQ_CW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
