@@ -1,30 +1,25 @@
-# RTL paths are relative to this file in verilog/.
-# The top-level module must be named student_top.
-# Example entries:
-# student_top.sv
-# core.sv
-signal_fanout.sv
-pc_increment.sv
-word_adder.sv
-word_compare.sv
-decode.sv
-alu.sv
-mul_div.sv
-wb_arb.sv
-prf.sv
-rob.sv
-branch_ctrl.sv
-branch_predictor.sv
-fetch.sv
-icache.sv
-dcache.sv
-data_prefetch.sv
-axi_bridge.sv
-iq_alu.sv
-iq_mem.sv
-issue_sched.sv
-single_issue.sv
-lsu.sv
-single_rename.sv
-rename.sv
+# Paths are relative to this file. Simulation monitors are excluded.
+common/signal_fanout.sv
+common/pc_increment.sv
+common/word_adder.sv
+common/word_compare.sv
+frontend/decode.sv
+execute/alu.sv
+execute/mul_div.sv
+backend/wb_arb.sv
+backend/prf.sv
+backend/rob.sv
+backend/branch_ctrl.sv
+frontend/branch_predictor.sv
+frontend/fetch.sv
+frontend/icache.sv
+memory/dcache.sv
+memory/data_prefetch.sv
+memory/axi_bridge.sv
+backend/iq_core.sv
+backend/iq_alu.sv
+backend/iq_mem.sv
+backend/issue.sv
+memory/lsu.sv
+backend/rename.sv
 student_top.sv

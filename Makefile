@@ -25,12 +25,16 @@ PROGRAM ?= program.bin
 EXPECTED ?=
 Case ?=
 JOBS ?= 1
-TIMING_ALL ?= 0
 MAX_CYCLES ?= 1000000
 BP_MAX_CYCLES ?= 100000000
-BP_WIDTH ?= 1
+BP_WB_WIDTH ?= 2
+BP_COMMIT_WIDTH ?= 2
 BP_ENABLE ?= 1
 BP_STATS_OUT ?= $(BUILD)/branch-accuracy
+IPC_STATS_OUT ?= $(BUILD)/ipc-profile
+PARAMETERS ?=
+IMAGE ?= cpu2026:latest
+REPORT_OUT ?= $(BUILD)/reports
 LATENCY ?= 10
 WAVE ?=
 LOG ?=
@@ -38,7 +42,7 @@ ifneq ($(strip $(BLACKBOXES)),)
 $(error BLACKBOXES has been removed; instantiate sram_fakeram instead)
 endif
 
-.PHONY: code help build run test test-icache test-branch test-timing test-branch-accuracy branch-accuracy perf synth clean
+.PHONY: code help build run test branch-accuracy ipc-profile report perf synth clean
 
 # OJ always builds RTL and collects ./code. SIM affects local run/test/perf only.
 code:
@@ -52,13 +56,12 @@ help:
 	@echo 'make build [FILELIST=verilog/filelist.f BUILD=build JOBS=1]'
 	@echo 'make run PROGRAM=program.bin EXPECTED=186 [WAVE=trace.vcd] [LOG=run.log]'
 	@echo 'make test [Case=correctness_add_to_100] [SIM=/path/to/prebuilt/sim]'
-	@echo 'make test-icache [BUILD=build JOBS=1]'
-	@echo 'make test-branch [BUILD=build JOBS=1]'
-	@echo 'make test-timing [Case=single_issue_test TIMING_ALL=0 BUILD=build JOBS=1]'
-	@echo '  Default: short single-issue suite; TIMING_ALL=1 runs all directed tests, serially.'
-	@echo 'make test-branch-accuracy [BUILD=build JOBS=1]'
-	@echo 'make branch-accuracy [Case=perf_qsort BP_WIDTH=1 BP_ENABLE=1 BP_MAX_CYCLES=100000000]'
-	@echo '  CSV/JSON and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
+	@echo 'make ipc-profile [Case=perf_qsort PARAMETERS="WB_WIDTH=1 COMMIT_WIDTH=2"]'
+	@echo '  JSON and workload logs: IPC_STATS_OUT (default BUILD/ipc-profile)'
+	@echo 'make branch-accuracy [Case=perf_qsort BP_WB_WIDTH=2 BP_COMMIT_WIDTH=2 BP_ENABLE=1]'
+	@echo '  JSON/CSV and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
+	@echo 'make report [IMAGE=cpu2026:latest REPORT_OUT=build/reports JOBS=1]'
+	@echo '  Runs correctness, perf, IPC profiling and synth sequentially in Docker.'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=5.0 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
@@ -86,27 +89,20 @@ test:
 		--testcases "$(TESTCASES)" --max-cycles $(MAX_CYCLES) --latency $(LATENCY) \
 		$(if $(SIM),--sim "$(SIM)",) $(if $(Case),--case "$(Case)",)
 
-test-icache:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_icache.py" --build "$(BUILD)/icache-tests" --jobs $(JOBS) \
-		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
-
-test-branch:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_branch.py" --build "$(BUILD)/branch-tests" --jobs $(JOBS) \
-		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
-
-test-timing:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/run_timing.py" --build "$(BUILD)/timing-tests" --jobs $(JOBS) $(if $(Case),--case "$(Case)",$(if $(filter 1,$(TIMING_ALL)),--all,)) \
-		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
-
-test-branch-accuracy:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/test_branch_accuracy.py" --out "$(BUILD)/branch-accuracy-tests" --jobs $(JOBS) \
-		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",)
-
 branch-accuracy:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/tb/branch_accuracy.py" --out "$(BP_STATS_OUT)" --filelist "$(FILELIST)" \
-		--testcases "$(TESTCASES)" --width $(BP_WIDTH) --bp-enable $(BP_ENABLE) \
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/branch_accuracy.py" --out "$(BP_STATS_OUT)" --filelist "$(FILELIST)" \
+		--testcases "$(TESTCASES)" --wb-width $(BP_WB_WIDTH) --commit-width $(BP_COMMIT_WIDTH) --bp-enable $(BP_ENABLE) \
 		--max-cycles $(BP_MAX_CYCLES) --latency $(LATENCY) --jobs $(JOBS) \
 		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",) $(if $(Case),--case "$(Case)",)
+
+ipc-profile:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/ipc_profile.py" --out "$(IPC_STATS_OUT)" --filelist "$(FILELIST)" \
+		--testcases "$(TESTCASES)" --max-cycles $(BP_MAX_CYCLES) --latency $(LATENCY) --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" $(if $(VERILATOR),--verilator "$(VERILATOR)",) \
+		$(foreach value,$(PARAMETERS),--parameter "$(value)") $(if $(Case),--case "$(Case)",)
+
+report:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/report.py" --image "$(IMAGE)" --output-dir "$(REPORT_OUT)" --jobs $(JOBS)
 
 perf:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/testcase.py" --kind perf --build "$(BUILD)" \

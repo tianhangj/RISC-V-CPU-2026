@@ -1,3 +1,5 @@
-不要修改 README 和 docs/*，在 interfaces.md 中对应修改接口
-要求使用system verilog 2005，修改代码后需要让 make synth 可以通过
-用 docker 就可以跑通仓库内的测试
+- 不要修改 README，docs/*，scripts下的直接文件和 scripts/ram，这些是课程项目要求
+- 在 interfaces.md 中对应修改接口，interfaces.md 仅用于描述项目接口和实现流程，无需验收或其他信息
+- 语言要求使用system verilog 2005
+- 需要能够确保代码可以仿真和综合
+- 运行环境由 docker 提供
