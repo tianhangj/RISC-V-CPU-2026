@@ -260,22 +260,3 @@ make branch-accuracy APPIMAGE= BP_WB_WIDTH=1 BP_COMMIT_WIDTH=2 BP_ENABLE=0
 在宿主机运行 `make report JOBS=2`，会手动、顺序启动 Docker 完成 correctness → perf → IPC → synth；任何一项失败仍保留该项日志，最终返回非零。报告记录 commit、工作区状态及当前源码散列，包含未提交的重构代码。`.githooks/post-commit` 已删除，仓库本地 `core.hooksPath=.githooks` 已取消；提交不再自动触发构建或报告。
 
 `make` / `make code` 保留 OJ 的 `./code` 入口。原 `test-icache`、分支单元测试和 timing 单元测试入口已移除；综合时序仍由官方 synth/timing 工具产生。修改 RTL 后必须通过 `make synth`，并检查面积和时序报告；当前重构不另设 MHz 验收门槛。
-
-## 10. 重构验收与维护
-
-基线源码、普通仿真结果、监视结果和综合报告保存在 `build/refactor/baseline/`。最终验收输出位于 `build/refactor/final/`；这些是本次运行产物，不是新建的仓库测试框架。
-
-验收比较默认配置下全部 correctness 输出/周期、六个 perf 的周期/IPC，以及监视器行为。配置矩阵覆盖 `WB_WIDTH={1,2,3}` × `COMMIT_WIDTH={1,2,4}`、预测/预取四种组合（默认组合复用）、较小和较大容量；每个配置运行现有 19 个 correctness 和 6 个 perf 程序。容量配置包含非 2 次幂 IQ/LQ，以及 1/2/4-way 缓存和不同 cache line 大小。
-
-本次 Docker 回归中，14 组配置的 350 次程序运行全部通过；最小容量配置另通过 3 个程序，覆盖 ROB=2、PRF=33、IQ/LQ/检查点深度=1、SQ=2 和单 cache set。11 个非法参数组合均被拒绝。默认 19 项正确性周期、6 项性能周期/IPC、原有 IPC 阻塞计数及逐 PC 分支统计与基线逐项一致。官方构建、开发监视构建和分支统计入口均已通过。手动 `make report` 也已实测，test、perf、ipc-profile、synth 四项均为 PASS，报告保存在 `build/refactor/manual-report/`。
-
-| 默认配置指标 | 基线 | 重构后 |
-| --- | ---: | ---: |
-| 六项性能几何平均 IPC | 0.8142 | 0.8142 |
-| 综合总面积（um²） | 17984.779 | 17993.265 |
-| 估计最高频率（MHz） | 172.55 | 192.30 |
-| 5 ns 目标下最差 setup slack（ns） | -0.7951 | -0.1999 |
-
-`make synth` 已通过；上述 slack 仍为负值，时序数据作为测量结果保留。逐配置结果见 `build/refactor/final/matrix.json`，基线比较见 `build/refactor/final/comparison.json`，综合细节见 `build/refactor/final/synth/opt/report.txt`。RTL 源码由 5175 行精简至 3923 行，统计不包含 monitor 和官方 SRAM 模型。
-
-维护时先修改对应功能目录，再同步本文件的参数、payload 和时序约定，最后运行官方程序、性能监视和综合。现有程序回归不等同于旧单元/形式测试的全部边界覆盖；要扩展覆盖时使用新的程序或临时分析产物，避免重新混入已删除的 tb 测试。
