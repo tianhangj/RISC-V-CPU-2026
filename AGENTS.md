@@ -2,4 +2,4 @@
 - 在 interfaces.md 中对应修改接口，interfaces.md 仅用于描述项目接口和实现流程，无需验收或其他信息
 - 语言要求使用system verilog 2005
 - 需要能够确保代码可以仿真和综合
-- 运行环境由 docker 提供
+- 运行环境由 docker 提供；如果在 Windows 上，则参考 `toolchain/USAGE.md` 进行运行和测试。
