@@ -30,8 +30,11 @@ module rob #(
     localparam integer TAG_BITS = RW;
     localparam integer ROB_ALLOC_BITS = PW + 2 + SIDW;
     localparam integer REG_COMMIT_BITS = PW;
-    logic [ROB_ALLOC_BITS-1:0] alloc [0:ROB_DEPTH-1];
-    logic [ROB_DEPTH-1:0] completed, store_started, store_responded;
+    wire [ROB_ALLOC_BITS-1:0] retire_alloc [0:COMMIT_WIDTH-1];
+    wire [COMMIT_WIDTH*RW-1:0] metadata_addr;
+    wire [COMMIT_WIDTH*ROB_ALLOC_BITS-1:0] metadata_data;
+    logic [ROB_DEPTH-1:0] completed;
+    reg head_store_started;
     logic [RW-1:0] head_q, tail_q;
     logic [ROB_CW-1:0] count_q;
     logic [ROB_CW-1:0] retire_count, keep_count;
@@ -44,18 +47,25 @@ module rob #(
     assign rob_head = head_q;
     assign rob_tail = tail_q;
     assign rob_free = ROB_DEPTH - count_q;
+    (* keep_hierarchy *) payload_ram #(.DEPTH(ROB_DEPTH), .WIDTH(ROB_ALLOC_BITS), .READ_PORTS(COMMIT_WIDTH)) metadata(
+        .clock(clock), .reset(reset), .write_valid(rob_free!=0), .write_addr(tail_q),
+        .write_data(disp_rob), .read_addr(metadata_addr), .read_data(metadata_data));
+    for (genvar lane=0; lane<COMMIT_WIDTH; lane=lane+1) begin : g_retire_metadata
+        assign metadata_addr[lane*RW +: RW]=head_q+RW'(lane);
+        assign retire_alloc[lane]=metadata_data[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
+    end
 
     always_comb begin
         keep_count = count_q;
         if (squash_valid) keep_count = {1'b0, (squash_tag - head_q)} + 1'b1;
         st_start_valid = 0;
-        st_start_id = alloc[head_q][SIDW-1:0];
+        st_start_id = retire_alloc[0][SIDW-1:0];
         head_completed = completed[head_q];
         for (int w = 0; w < WB_WIDTH; w = w + 1)
             if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
                 head_completed = 1;
-        if (count_q != 0 && alloc[head_q][SIDW +: 2] == 2'd3 &&
-            head_completed && !store_started[head_q]) st_start_valid = 1;
+        if (count_q != 0 && retire_alloc[0][SIDW +: 2] == 2'd3 &&
+            head_completed && !head_store_started) st_start_valid = 1;
         retire_count = 0;
         stop_retire = 0;
         reg_commit_valid = 0;
@@ -63,27 +73,19 @@ module rob #(
         for (int lane = 0; lane < COMMIT_WIDTH; lane = lane + 1) begin
             slot = (head_q + lane) % ROB_DEPTH;
             if (!stop_retire && lane < keep_count) begin
-                if (alloc[slot][SIDW +: 2] == 2'd3) begin
-                    if (lane == 0 && (store_responded[slot] ||
-                        (store_started[slot] && st_done_valid) ||
-                        (st_start_valid && st_done_valid)))
+                if (retire_alloc[lane][SIDW +: 2] == 2'd3) begin
+                    if (lane == 0 && (head_store_started || st_start_valid) && st_done_valid)
                         retire_count = retire_count + 1'b1;
                     else stop_retire = 1;
                 end else if (completed[slot]) begin
                     retire_count = retire_count + 1'b1;
-                    if (alloc[slot][ROB_ALLOC_BITS-1 -: PW] != 0) begin
+                    if (retire_alloc[lane][ROB_ALLOC_BITS-1 -: PW] != 0) begin
                         reg_commit_valid[lane] = 1;
-                        reg_commit_payload[lane*PW +: PW] = alloc[slot][ROB_ALLOC_BITS-1 -: PW];
+                        reg_commit_payload[lane*PW +: PW] = retire_alloc[lane][ROB_ALLOC_BITS-1 -: PW];
                     end
                 end else stop_retire = 1;
             end
         end
-    end
-
-    for (genvar s = 0; s < ROB_DEPTH; s = s+1) begin : g_prepare_alloc
-        always_ff @(posedge clock)
-            if (0 < rob_free && s == (int'(tail_q)) % ROB_DEPTH)
-                    alloc[s] <= disp_rob[ROB_ALLOC_BITS-1:0];
     end
 
     always_ff @(posedge clock) begin
@@ -92,12 +94,12 @@ module rob #(
             tail_q <= 0;
             count_q <= 0;
             completed <= 0;
-            store_started <= 0;
-            store_responded <= 0;
+            head_store_started<=0;
         end else begin
-            if (st_start_valid) store_started[head_q] <= 1;
-            if (st_done_valid && count_q != 0 && store_started[head_q])
-                store_responded[head_q] <= 1;
+            // Only the current head can own an authorized Store. Every
+            // completion retires it at this edge, so no per-slot flags remain.
+            if (retire_count!=0) head_store_started<=0;
+            else if (st_start_valid) head_store_started<=1;
             for (int w = 0; w < WB_WIDTH; w = w + 1) begin
                 if (done_valid[w] &&
                     (age(done_tag[w*TAG_BITS +: TAG_BITS], head_q) < count_q) &&
@@ -109,8 +111,6 @@ module rob #(
                 begin
                     if (0 < disp_count) begin
                         completed[(tail_q + 0) % ROB_DEPTH] <= 0;
-                        store_started[(tail_q + 0) % ROB_DEPTH] <= 0;
-                        store_responded[(tail_q + 0) % ROB_DEPTH] <= 0;
                     end
                 end
             end

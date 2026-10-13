@@ -14,7 +14,7 @@ module iq_mem #(
     input logic disp_src1_ready, disp_src2_ready,
     input logic [WAKE_WIDTH-1:0] wake_valid,
     input logic [WAKE_WIDTH*PW-1:0] wake_pdst,
-    output logic [MIQ_CW-1:0] mem_iq_free,
+    output wire mem_iq_has_free,
     output logic cand_valid,
     output logic cand_src2_ready,
     output logic [MEM_IQ_BITS-1:0] cand_uop,
@@ -31,7 +31,7 @@ module iq_mem #(
     iq_core #(.WAKE_WIDTH(WAKE_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .DEPTH(IQ_MEM_DEPTH), .UOP_BITS(MEM_IQ_BITS), .SRC2_LSB(32), .MEM_QUEUE(1), .STORE_OP_LSB(32+2*PW+MIDW)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
-        .wake_valid, .wake_pdst, .free_count(mem_iq_free),
+        .wake_valid, .wake_pdst, .has_free(mem_iq_has_free),
         .cand_valid(cand_valid), .cand_src2_ready(cand_src2_ready), .cand_uop(cand_uop),
         .cand_take(cand_take));
 

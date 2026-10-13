@@ -1,5 +1,6 @@
 # Paths are relative to this file. Simulation monitors are excluded.
 common/signal_fanout.sv
+common/payload_ram.sv
 common/pc_increment.sv
 common/word_adder.sv
 common/word_compare.sv

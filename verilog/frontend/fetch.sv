@@ -33,10 +33,6 @@ module fetch #(
     localparam integer LINE_W=$clog2(LINE_WORDS);
     // 0 free, 2 waiting, 3 ready. Held requests do not allocate slots yet.
     reg [1:0] state [0:FETCH_QUEUE_DEPTH-1];
-    reg [31:0] slot_pc [0:FETCH_QUEUE_DEPTH-1], slot_npc [0:FETCH_QUEUE_DEPTH-1];
-    reg [31:0] slot_inst [0:FETCH_QUEUE_DEPTH-1];
-    reg slot_taken [0:FETCH_QUEUE_DEPTH-1];
-    reg [GEN_WIDTH-1:0] slot_gen [0:FETCH_QUEUE_DEPTH-1];
     reg [FIDW-1:0] head_q, tail_q;
     reg [QCW-1:0] count_q;
     reg [OCW-1:0] outstanding_q;
@@ -71,6 +67,21 @@ module fetch #(
     wire [FIDW-1:0] rsp_id=ic_rsp_payload[32+DCW +: FIDW];
     wire [GEN_WIDTH-1:0] rsp_gen=ic_rsp_payload[32+DCW+FIDW +: GEN_WIDTH];
     wire rsp_current=ic_rsp_valid && rsp_gen==fetch_gen;
+    localparam integer META_BITS=65;
+    wire [META_BITS-1:0] request_meta={request_pc,request_npc,request_taken};
+    // Every live slot belongs to fetch_gen; redirect clears all slot states.
+    wire response_write=rsp_current && rsp_count!=0 && state[rsp_id]==2;
+    wire zero_write=create_fire && !request_ram;
+    wire [META_BITS-1:0] head_meta;
+    wire [31:0] head_inst;
+    // Preparation writes only the free tail; create_fire owns slot validity.
+    (* keep_hierarchy *) payload_ram #(.DEPTH(FETCH_QUEUE_DEPTH), .WIDTH(META_BITS)) metadata (
+        .clock(clock), .reset(reset), .write_valid(state[tail_q]==0 && request_count!=0),
+        .write_addr(tail_q), .write_data(request_meta), .read_addr(head_q), .read_data(head_meta));
+    (* keep_hierarchy *) payload_ram #(.DEPTH(FETCH_QUEUE_DEPTH), .WIDTH(32)) instructions (
+        .clock(clock), .reset(reset), .write_valid(response_write || zero_write),
+        .write_addr(zero_write?tail_q:rsp_id), .write_data(zero_write?32'b0:ic_rsp_payload[31:0]),
+        .read_addr(head_q), .read_data(head_inst));
     wire out_fire=fetch_valid && fetch_ready;
     wire direct_fire=output_count==0 && out_fire;
     wire load_output=!reset && !fetch_redirect_valid && output_count<2 && ready_count!=0 && !direct_fire;
@@ -112,10 +123,9 @@ module fetch #(
         read_packet=0; read_ready=0;
         begin
             slot_index=(int'(head_q))%FETCH_QUEUE_DEPTH;
-            read_packet={slot_pc[slot_index],slot_inst[slot_index],slot_npc[slot_index]};
+            read_packet={head_meta[64:33],head_inst,head_meta[32:1]};
             read_ready=state[slot_index]==3;
             if (rsp_current && 0<rsp_count && state[slot_index]==2 &&
-                    slot_gen[slot_index]==rsp_gen &&
                     slot_index==(int'(rsp_id))%FETCH_QUEUE_DEPTH) begin
                     read_ready=1;
                     read_packet[63:32]=ic_rsp_payload[31:0];
@@ -124,7 +134,7 @@ module fetch #(
             if (0>=count_q || !read_ready) stop_ready=1;
             if (!stop_ready) begin
                 ready_count=ready_count+1'b1;
-                if (slot_taken[slot_index]) stop_ready=1;
+                if (head_meta[0]) stop_ready=1;
             end
         end
     end
@@ -171,17 +181,14 @@ module fetch #(
             if (reset || fetch_redirect_valid) state[slot]<=0;
             else begin
                 begin
-                    if (rsp_current && 0<rsp_count && state[slot]==2 && slot_gen[slot]==rsp_gen &&
+                    if (rsp_current && 0<rsp_count && state[slot]==2 &&
                         slot==(int'(rsp_id))%FETCH_QUEUE_DEPTH) begin
-                        slot_inst[slot]<=ic_rsp_payload[31:0]; state[slot]<=3;
+                        state[slot]<=3;
                     end
                     if (drain_output && 0<ready_count && slot==(int'(head_q))%FETCH_QUEUE_DEPTH)
                         state[slot]<=0;
                     if (create_fire && 0<request_count && slot==(int'(tail_q))%FETCH_QUEUE_DEPTH) begin
-                        slot_pc[slot]<=request_pc;
-                        slot_npc[slot]<=request_npc[31:0]; slot_taken[slot]<=request_taken;
-                        slot_gen[slot]<=fetch_gen; state[slot]<=request_ram?2:3;
-                        if (!request_ram) slot_inst[slot]<=0;
+                        state[slot]<=request_ram?2:3;
                     end
                 end
             end

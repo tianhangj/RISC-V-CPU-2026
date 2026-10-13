@@ -69,11 +69,11 @@ bind student_top ipc_stats_monitor u_ipc_stats (
     .any_candidate((|alu_cand_valid) || mem_cand_valid),
     .fetch_starved(!fetch_valid && decode_ready),
     .rename_blocked(decode_valid && !decode_ready),
-    .rob_full(rob_free == 0), .alu_full(alu_iq_free == 0), .mem_full(mem_iq_free == 0),
-    .cp_full(cp_free == 0), .lsq_full(lq_free == 0 || sq_free == 0),
-    .head_store_wait(u_rob.count_q != 0 && u_rob.alloc[rob_head][SIDW +: 2] == 3 &&
+    .rob_full(rob_free == 0), .alu_full(!alu_iq_has_free), .mem_full(!mem_iq_has_free),
+    .cp_full(!cp_has_free), .lsq_full(!lq_has_free || !sq_has_free),
+    .head_store_wait(u_rob.count_q != 0 && u_rob.retire_alloc[0][SIDW +: 2] == 3 &&
                      u_rob.retire_count == 0),
-    .head_load_wait(u_rob.count_q != 0 && u_rob.alloc[rob_head][SIDW +: 2] == 2 &&
+    .head_load_wait(u_rob.count_q != 0 && u_rob.retire_alloc[0][SIDW +: 2] == 2 &&
                     u_rob.retire_count == 0),
     .squash(squash_valid),
     .dcache_miss(u_dcache.state == 9 && !u_dcache.lookup_hit),

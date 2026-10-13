@@ -13,7 +13,7 @@ module iq_alu #(
     input logic disp_src1_ready, disp_src2_ready,
     input logic [WAKE_WIDTH-1:0] wake_valid,
     input logic [WAKE_WIDTH*PW-1:0] wake_pdst,
-    output logic [AIQ_CW-1:0] alu_iq_free,
+    output wire alu_iq_has_free,
     output logic cand_valid,
     output logic [ALU_IQ_BITS-1:0] cand_uop,
     input logic cand_take
@@ -27,7 +27,7 @@ module iq_alu #(
     iq_core #(.WAKE_WIDTH(WAKE_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .DEPTH(IQ_ALU_DEPTH), .UOP_BITS(ALU_IQ_BITS), .SRC2_LSB(64)) core (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .disp_valid, .disp_prepare, .disp_uop, .disp_src1_ready, .disp_src2_ready,
-        .wake_valid, .wake_pdst, .free_count(alu_iq_free),
+        .wake_valid, .wake_pdst, .has_free(alu_iq_has_free),
         .cand_valid(cand_valid), .cand_src2_ready(), .cand_uop(cand_uop),
         .cand_take(cand_take));
 

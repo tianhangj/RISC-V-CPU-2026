@@ -123,7 +123,7 @@ module issue #(
             end
         for (integer w=0; w<3; w=w+1)
             for (integer half=0; half<2; half=half+1)
-                if (w<2) begin
+                if (w==0) begin
                     if (current1_select[w*4+2+half]) branch_operand1[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                     if (current2_select[w*4+2+half]) branch_operand2[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                 end
@@ -143,10 +143,10 @@ module issue #(
                 end
             for (integer w=0; w<3; w=w+1)
                 for (integer half=0; half<2; half=half+1) begin
-                    if (w!=2 &&
+                    if (w==0 &&
                         current1_select[(lane*3+w)*4+half])
                         forwarded1[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
-                    if ((lane==2 || w!=2) &&
+                    if ((lane==2 || w==0) &&
                         current2_select[(lane*3+w)*4+half])
                         forwarded2[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                 end

@@ -35,7 +35,6 @@ module icache #(
     localparam integer TAG_WIDTH = 32-OFFSET_BITS-SET_BITS;
     localparam integer FCW = $clog2(LINE_WORDS+1);
     logic [SETS*ICACHE_WAYS-1:0] line_valid;
-    logic [TAG_WIDTH-1:0] tags [0:SETS*ICACHE_WAYS-1];
     logic [WAY_WIDTH-1:0] replace_way [0:SETS-1];
     wire [ICACHE_WAYS*LINE_BITS-1:0] ram_data;
     wire [31:0] req_addr = ic_req_payload[31:0];
@@ -89,24 +88,19 @@ module icache #(
                 replace_way[set_id] <= (fill_way == WAY_WIDTH'(ICACHE_WAYS-1)) ?
                     0 : fill_way + 1'b1;
         end
-        for (genvar way = 0; way < ICACHE_WAYS; way = way+1) begin : g_tag_write
-            always_ff @(posedge clock) begin
-                if (!reset && write_line && fill_set == SET_WIDTH'(set_id) &&
-                    fill_way == WAY_WIDTH'(way))
-                    tags[set_id*ICACHE_WAYS+way] <=
-                        TAG_WIDTH'(fill_addr >> (OFFSET_BITS+SET_BITS));
-            end
-        end
     end
     for (genvar way = 0; way < ICACHE_WAYS; way = way+1) begin : g_tag_read
-        wire [SETS-1:0] tag_hits, valids;
+        wire [SETS-1:0] valids;
+        wire [TAG_WIDTH-1:0] selected_tag;
+        payload_ram #(.DEPTH(SETS), .WIDTH(TAG_WIDTH)) tags (
+            .clock(clock), .reset(reset), .write_valid(write_line && fill_way==WAY_WIDTH'(way)),
+            .write_addr(fill_set), .write_data(TAG_WIDTH'(fill_addr >> (OFFSET_BITS+SET_BITS))),
+            .read_addr(req_set), .read_data(selected_tag));
         for (genvar set_id = 0; set_id < SETS; set_id = set_id+1) begin : g_match
             assign valids[set_id] = set_select[set_id] && line_valid[set_id*ICACHE_WAYS+way];
-            assign tag_hits[set_id] = valids[set_id] &&
-                tags[set_id*ICACHE_WAYS+way] == req_tag;
         end
         assign way_valid[way] = |valids;
-        assign way_hit[way] = |tag_hits;
+        assign way_hit[way] = way_valid[way] && selected_tag==req_tag;
     end
     always_comb begin
         replacement = 0;
@@ -139,7 +133,10 @@ module icache #(
             else if (fill_response && 0 < waiter_count)
                 rsp_insts[31:0] = fill_data[(int'(waiter_word))*32 +: 32];
         end
-        ic_rsp_valid = !reset && !fetch_redirect_valid && (hit_pending || fill_response);
+        // The response belongs to the captured request generation. Recovery
+        // clears the frontend owners at the edge; keep this preview independent
+        // of redirect so cancellation does not feed the instruction payload.
+        ic_rsp_valid = !reset && (hit_pending || fill_response);
         if (hit_pending)
             ic_rsp_payload = {hit_gen_q, hit_id_q, hit_count_q, rsp_insts};
         else

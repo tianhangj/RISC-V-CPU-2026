@@ -46,10 +46,6 @@ module axi_bridge #(
     localparam integer QW = (AXI_RD_OUTSTANDING > 1) ? $clog2(AXI_RD_OUTSTANDING) : 1;
     localparam integer CW = $clog2(AXI_RD_OUTSTANDING + 1);
     localparam integer MIDW = (LD_ID_WIDTH > IF_ID_WIDTH) ? LD_ID_WIDTH : IF_ID_WIDTH;
-    logic [31:0] address [0:AXI_RD_OUTSTANDING-1];
-    logic [GEN_WIDTH-1:0] generation [0:AXI_RD_OUTSTANDING-1];
-    logic [MIDW-1:0] identifier [0:AXI_RD_OUTSTANDING-1];
-    logic is_load [0:AXI_RD_OUTSTANDING-1];
     logic [QW-1:0] enqueue_q, ar_q, response_q;
     logic [CW-1:0] unsent_q, sent_q;
     logic prefer_load;
@@ -61,11 +57,26 @@ module axi_bridge #(
     wire st_accept = st_req_valid && st_req_ready;
     localparam integer WQW = (AXI_WR_OUTSTANDING > 1) ? $clog2(AXI_WR_OUTSTANDING) : 1;
     localparam integer WCW = $clog2(AXI_WR_OUTSTANDING + 1);
-    logic [WRITE_REQ_BITS-1:0] write_q [0:AXI_WR_OUTSTANDING-1];
     logic [WQW-1:0] write_tail, aw_head, w_head;
     logic [WCW-1:0] write_count, aw_count, w_count;
     wire aw_fire = awvalid && awready;
     wire w_fire = wvalid && wready;
+    localparam integer META_BITS=GEN_WIDTH+MIDW+1;
+    wire [31:0] accepted_address=accept_load?ld_req_payload[31:0]:if_req_payload[31:0];
+    wire [META_BITS-1:0] accepted_meta=accept_load?
+        {ld_req_payload[32+LD_ID_WIDTH +: GEN_WIDTH],MIDW'(ld_req_payload[32 +: LD_ID_WIDTH]),1'b1}:
+        {if_req_payload[32+IF_ID_WIDTH +: GEN_WIDTH],MIDW'(if_req_payload[32 +: IF_ID_WIDTH]),1'b0};
+    wire [META_BITS-1:0] response_meta;
+    wire [2*WRITE_REQ_BITS-1:0] write_ports;
+    payload_ram #(.DEPTH(AXI_RD_OUTSTANDING), .WIDTH(32)) read_addresses (
+        .clock(clock), .reset(reset), .write_valid(read_accept), .write_addr(enqueue_q),
+        .write_data(accepted_address), .read_addr(ar_q), .read_data(araddr));
+    payload_ram #(.DEPTH(AXI_RD_OUTSTANDING), .WIDTH(META_BITS)) read_identities (
+        .clock(clock), .reset(reset), .write_valid(read_accept), .write_addr(enqueue_q),
+        .write_data(accepted_meta), .read_addr(response_q), .read_data(response_meta));
+    payload_ram #(.DEPTH(AXI_WR_OUTSTANDING), .WIDTH(WRITE_REQ_BITS), .READ_PORTS(2)) write_requests (
+        .clock(clock), .reset(reset), .write_valid(st_accept), .write_addr(write_tail),
+        .write_data(st_req_payload), .read_addr({w_head,aw_head}), .read_data(write_ports));
 
     always_comb begin
         if_req_ready = 0;
@@ -81,16 +92,15 @@ module axi_bridge #(
         end
     end
     assign arvalid = unsent_q != 0;
-    assign araddr = address[ar_q];
     assign rready = sent_q != 0;
-    assign if_rsp_valid = r_fire && !is_load[response_q];
-    assign ld_rsp_valid = r_fire && is_load[response_q];
-    assign if_rsp_payload = {generation[response_q], identifier[response_q][IF_ID_WIDTH-1:0], rdata};
-    assign ld_rsp_payload = {generation[response_q], identifier[response_q][LD_ID_WIDTH-1:0], rdata};
+    assign if_rsp_valid = r_fire && !response_meta[0];
+    assign ld_rsp_valid = r_fire && response_meta[0];
+    assign if_rsp_payload = {response_meta[META_BITS-1 -: GEN_WIDTH], response_meta[1 +: IF_ID_WIDTH], rdata};
+    assign ld_rsp_payload = {response_meta[META_BITS-1 -: GEN_WIDTH], response_meta[1 +: LD_ID_WIDTH], rdata};
     assign st_req_ready = write_count < AXI_WR_OUTSTANDING;
-    assign awaddr = write_q[aw_head][WRITE_REQ_BITS-1 -: 32];
-    assign wdata = write_q[w_head][35:4];
-    assign wstrb = write_q[w_head][3:0];
+    assign awaddr = write_ports[WRITE_REQ_BITS-1 -: 32];
+    assign wdata = write_ports[WRITE_REQ_BITS+4 +: 32];
+    assign wstrb = write_ports[WRITE_REQ_BITS +: 4];
     assign awvalid = aw_count != 0;
     assign wvalid = w_count != 0;
     // A response is eligible only after both halves of its request have left.
@@ -113,16 +123,6 @@ module axi_bridge #(
             w_count <= 0;
         end else begin
             if (read_accept) begin
-                is_load[enqueue_q] <= accept_load;
-                if (accept_load) begin
-                    address[enqueue_q] <= ld_req_payload[31:0];
-                    identifier[enqueue_q] <= ld_req_payload[32 +: LD_ID_WIDTH];
-                    generation[enqueue_q] <= ld_req_payload[32+LD_ID_WIDTH +: GEN_WIDTH];
-                end else begin
-                    address[enqueue_q] <= if_req_payload[31:0];
-                    identifier[enqueue_q] <= MIDW'(if_req_payload[32 +: IF_ID_WIDTH]);
-                    generation[enqueue_q] <= if_req_payload[32+IF_ID_WIDTH +: GEN_WIDTH];
-                end
                 enqueue_q <= (enqueue_q == AXI_RD_OUTSTANDING-1) ? 0 : enqueue_q + 1'b1;
                 prefer_load <= !accept_load;
             end
@@ -139,9 +139,5 @@ module axi_bridge #(
             aw_count <= aw_count + st_accept - aw_fire;
             w_count <= w_count + st_accept - w_fire;
         end
-    end
-    for (genvar slot = 0; slot < AXI_WR_OUTSTANDING; slot = slot+1) begin : g_write_queue
-        always_ff @(posedge clock)
-            if (st_accept && write_tail == WQW'(slot)) write_q[slot] <= st_req_payload;
     end
 endmodule

@@ -72,8 +72,12 @@ module alu #(
     wire [31:0] branch_sum;
     (* keep_hierarchy, keep *) word_adder branch_adder(
         .a(in_op==4?branch_a:in_pc), .b(in_imm), .carry_in(1'b0), .sum(branch_sum));
+    wire [1:0] next_pc_taken;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2))
+        distribute_next_pc_taken(taken,next_pc_taken);
+    wire [31:0] sequential_pc=in_pc+32'd4;
     always_comb begin
-        value=0; next_pc=in_pc+32'd4; control_flow=0; taken=0;
+        value=0; control_flow=0; taken=0;
         target=(in_op==4)?(branch_sum & 32'hfffffffe):branch_sum;
         case (in_op)
             1: value=in_imm;
@@ -93,7 +97,10 @@ module alu #(
             17,18,19,22,26,27: value=shift_value;
             default: value=0;
         endcase
-        if (taken) next_pc=target;
+    end
+    for (genvar half=0; half<2; half=half+1) begin : g_next_pc
+        assign next_pc[half*16 +: 16]=next_pc_taken[half]?
+            target[half*16 +: 16]:sequential_pc[half*16 +: 16];
     end
 
     assign exec_ready = !occupied || result_ready;

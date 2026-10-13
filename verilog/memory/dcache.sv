@@ -61,6 +61,9 @@ module dcache #(
     reg [3:0] request_mask;
     reg [GEN_WIDTH+LIDW-1:0] request_identity;
     reg request_store, flushing;
+    // Writes stay ordered in the AXI bridge. During MMIO drain, continue
+    // scanning after a line is sent and wait for every response before MMIO.
+    reg [5:0] flush_outstanding;
     reg [SET_W-1:0] victim_set;
     reg [WAY_W-1:0] victim_way;
     reg [TAG_W-1:0] victim_tag;
@@ -118,6 +121,47 @@ module dcache #(
     // the following cycle and can accept the next load at the same edge.
     wire [WAYS*TAG_W-1:0] tag_rdata;
     wire [WAYS*LINE_BITS-1:0] way_rdata;
+    localparam integer META_LOW_W=(SET_W<4)?SET_W:4;
+    localparam integer META_WORDS=2**META_LOW_W;
+    localparam integer META_GROUPS=(SETS+META_WORDS-1)/META_WORDS;
+    wire [2*WAYS-1:0] selected_metadata [0:1];
+    wire [WAYS-1:0] request_valid=selected_metadata[0][WAYS-1:0];
+    wire [WAYS-1:0] request_dirty=selected_metadata[0][2*WAYS-1:WAYS];
+    wire [WAYS-1:0] hum_valid=selected_metadata[1][WAYS-1:0];
+    for (genvar port=0; port<2; port=port+1) begin : g_metadata_read
+        wire [SET_W-1:0] addr;
+        (* keep_hierarchy, keep *) signal_buffer #(.WIDTH(SET_W)) isolate_address(
+            (port==0)?request_set:hum_set,addr);
+        wire [META_WORDS-1:0] low_decode;
+        wire [META_GROUPS*META_WORDS-1:0] group_decode;
+        wire [2*WAYS-1:0] group_data [0:META_GROUPS-1];
+        reg [2*WAYS-1:0] data;
+        for (genvar low=0; low<META_WORDS; low=low+1) begin : g_low
+            assign low_decode[low]=addr[META_LOW_W-1:0]==META_LOW_W'(low);
+        end
+        (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(META_WORDS), .BRANCHES(META_GROUPS))
+            distribute_low(low_decode,group_decode);
+        for (genvar group=0; group<META_GROUPS; group=group+1) begin : g_group
+            reg [2*WAYS-1:0] selected;
+            always @* begin
+                selected=0;
+                for (integer way=0; way<WAYS; way=way+1)
+                    for (integer low=0; low<META_WORDS; low=low+1)
+                        if (group*META_WORDS+low<SETS) begin
+                            selected[way]=selected[way] |
+                                (valid[way*SETS+group*META_WORDS+low] & group_decode[group*META_WORDS+low]);
+                            selected[WAYS+way]=selected[WAYS+way] |
+                                (dirty[way*SETS+group*META_WORDS+low] & group_decode[group*META_WORDS+low]);
+                        end
+            end
+            assign group_data[group]=selected & {2*WAYS{(addr >> META_LOW_W)==SET_W'(group)}};
+        end
+        always @* begin
+            data=0;
+            for (integer group=0; group<META_GROUPS; group=group+1) data=data | group_data[group];
+        end
+        assign selected_metadata[port]=data;
+    end
     reg lookup_hit, invalid_found;
     reg [WAY_W-1:0] hit_way, replacement_way;
     always @* begin
@@ -126,12 +170,12 @@ module dcache #(
         invalid_found = 0;
         replacement_way = replace_way[request_set];
         for (integer way = 0; way < WAYS; way = way+1) begin
-            if (!lookup_hit && valid[way*SETS+request_set] &&
+            if (!lookup_hit && request_valid[way] &&
                 tag_rdata[way*TAG_W +: TAG_W] == request_addr[31 -: TAG_W]) begin
                 lookup_hit = 1;
                 hit_way = WAY_W'(way);
             end
-            if (!invalid_found && !valid[way*SETS+request_set]) begin
+            if (!invalid_found && !request_valid[way]) begin
                 invalid_found = 1;
                 replacement_way = WAY_W'(way);
             end
@@ -140,15 +184,16 @@ module dcache #(
     always @* begin
         hum_hit=0; hum_hit_data=0;
         for (integer way=0; way<WAYS; way=way+1)
-            if (valid[way*SETS+hum_set] && tag_rdata[way*TAG_W +: TAG_W]==hum_request[31 -: TAG_W]) begin
+            if (hum_valid[way] && tag_rdata[way*TAG_W +: TAG_W]==hum_request[31 -: TAG_W]) begin
                 hum_hit=1;
                 hum_hit_data=hum_probe_words[way*32 +: 32];
             end
     end
     wire hit_load = state == PROBE && lookup_hit && !request_store;
     wire hit_store = state == PROBE && lookup_hit && request_store;
-    wire writeback_complete = state == WRITE_WAIT &&
-        (received_count == WORDS || (mem_st_rsp_valid && received_count == WORDS-1));
+    wire flush_line_sent=flushing && state==WRITEBACK && write_fire && sent_count==WORDS-1;
+    wire writeback_complete = flush_line_sent || (state == WRITE_WAIT &&
+        (received_count == WORDS || (mem_st_rsp_valid && received_count == WORDS-1)));
     wire tag_en = ((accept || hum_accept) && ram_address) || state == INSTALL ||
         (state == FLUSH_SCAN && flush_valid[1]);
     wire [SET_W-1:0] tag_addr = state == INSTALL ? request_set :
@@ -184,9 +229,20 @@ module dcache #(
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(7))
         distribute_accept(accept,accept_capture);
     assign ld_rsp_valid = primary_response || hum_response;
-    assign ld_rsp_payload = hum_response ? {hum_request[LD_BITS-1:32],hum_held?hum_data:hum_hit_data} :
+    localparam integer RESPONSE_GROUPS=(LD_BITS+15)/16;
+    wire [RESPONSE_GROUPS-1:0] hum_response_choice;
+    wire [LD_BITS-1:0] hum_payload={hum_request[LD_BITS-1:32],hum_held?hum_data:hum_hit_data};
+    wire [LD_BITS-1:0] primary_payload=
         bulk_response ? {request_identity,bulk_word} :
         state == PROBE ? {request_identity, hit_word} : refill_hit_pending ? refill_hit_response : miss_response;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(RESPONSE_GROUPS))
+        distribute_hum_response(hum_response,hum_response_choice);
+    for (genvar chunk=0; chunk<RESPONSE_GROUPS; chunk=chunk+1) begin : g_response_payload
+        localparam integer BASE=chunk*16;
+        localparam integer BITS=(LD_BITS-BASE>16)?16:LD_BITS-BASE;
+        assign ld_rsp_payload[BASE +: BITS]=hum_response_choice[chunk]?
+            hum_payload[BASE +: BITS]:primary_payload[BASE +: BITS];
+    end
     // A hit completes at the same edge that performs its SRAM write.
     assign st_rsp_valid = hit_store || store_pending;
 
@@ -424,7 +480,15 @@ module dcache #(
             sent_count <= 0;
             received_count <= 0;
             flushing <= 0;
+            flush_outstanding<=0;
         end else begin
+            if (flushing && state!=IO_SEND && state!=IO_WAIT) begin
+                case ({state==WRITEBACK && write_fire,mem_st_rsp_valid})
+                    2'b10: flush_outstanding<=flush_outstanding+1'b1;
+                    2'b01: flush_outstanding<=flush_outstanding-1'b1;
+                    default: begin end
+                endcase
+            end
             hum_probe<=hum_accept;
             if (hum_accept) begin
                 hum_pending<=1; hum_request<=ld_req_payload;
@@ -443,8 +507,7 @@ module dcache #(
                         sent_count <= 0;
                         received_count <= 0;
                         flushing <= 0;
-                        state <= (valid[replacement_way*SETS+request_set] &&
-                            dirty[replacement_way*SETS+request_set]) ?
+                        state <= (request_valid[replacement_way] && request_dirty[replacement_way]) ?
                             (probe_partial ? VICTIM : WRITEBACK) : REFILL;
                     end else begin
                         state <= IDLE;
@@ -464,7 +527,7 @@ module dcache #(
                 WRITEBACK: begin
                     if (write_fire) begin
                         sent_count <= sent_count + 1'b1;
-                        if (sent_count == WORDS-1) state <= WRITE_WAIT;
+                        if (sent_count == WORDS-1) state <= flushing?FLUSH_SCAN:WRITE_WAIT;
                     end
                     if (mem_st_rsp_valid) received_count <= received_count + 1'b1;
                 end
@@ -497,7 +560,7 @@ module dcache #(
                         victim_set <= flush_set;
                         victim_way <= flush_way;
                         state <= VICTIM;
-                    end else state <= IO_SEND;
+                    end else if (flush_outstanding==0) state <= IO_SEND;
                 end
                 IO_SEND: if (write_fire) state <= IO_WAIT;
                 IO_WAIT: if (mem_st_rsp_valid) begin

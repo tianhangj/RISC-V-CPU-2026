@@ -15,7 +15,7 @@ module iq_core #(
     input logic disp_src1_ready, disp_src2_ready,
     input logic [WAKE_WIDTH-1:0] wake_valid,
     input logic [WAKE_WIDTH*PW-1:0] wake_pdst,
-    output logic [CW-1:0] free_count,
+    output wire has_free,
     output logic cand_valid,
     output logic cand_src2_ready,
     output logic [UOP_BITS-1:0] cand_uop,
@@ -53,11 +53,34 @@ module iq_core #(
         end
     end endgenerate
     logic [DEPTH-1:0] alloc_select;
-    logic [CW-1:0] free_rank [0:DEPTH-1];
+    wire [DEPTH:0] free_prefix;
+    assign has_free = |(~valid_q);
+    assign free_prefix[0] = 1'b0;
+    for (genvar s=0; s<DEPTH; s=s+1) begin : g_first_free
+        assign free_prefix[s+1] = free_prefix[s] || !valid_q[s];
+        assign alloc_select[s] = !valid_q[s] && !free_prefix[s];
+    end
     logic [DEPTH-1:0] cand_select;
     logic [DEPTH-1:0] ready_candidate, data_ready;
+    logic incoming_ready1, incoming_ready2;
+    wire incoming_store = MEM_QUEUE!=0 && disp_uop[STORE_OP_LSB +: 3]>=5;
+    wire dispatch_bypass = disp_valid && !(|ready_candidate) && incoming_ready1 &&
+        (incoming_ready2 || incoming_store);
+    always @* begin
+        incoming_ready1 = disp_src1_ready || disp_uop[SRC2_LSB+PW +: PW]==0;
+        incoming_ready2 = disp_src2_ready || disp_uop[SRC2_LSB +: PW]==0;
+        for (integer w=0; w<WAKE_WIDTH; w=w+1) begin
+            if (wake_valid[w] && disp_uop[SRC2_LSB+PW +: PW]==wake_pdst[w*PW +: PW])
+                incoming_ready1 = 1;
+            if (wake_valid[w] && disp_uop[SRC2_LSB +: PW]==wake_pdst[w*PW +: PW])
+                incoming_ready2 = 1;
+        end
+    end
     localparam integer PAYLOAD_GROUPS = (UOP_BITS+15)/16;
     wire [DEPTH*PAYLOAD_GROUPS-1:0] candidate_mask;
+    wire [PAYLOAD_GROUPS-1:0] dispatch_mask;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PAYLOAD_GROUPS)) distribute_dispatch(
+        !(|ready_candidate),dispatch_mask);
     begin : g_candidate_fanout
         for (genvar slot = 0; slot < DEPTH; slot = slot+1) begin : g_slot
             (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PAYLOAD_GROUPS)) distribute(
@@ -66,13 +89,12 @@ module iq_core #(
         end
     end
     integer alloc_slot;
-    integer free_temp;
     logic [PW-1:0] ps1, ps2;
     logic [PW-1:0] select_ps1, select_ps2;
     logic select_ready1, select_ready2;
     logic w1, w2;
     always @(valid_q or ready1_q or ready2_q or rob_head or entry_flat or disp_prepare or
-             wake_valid or wake_pdst or older_flat) begin
+             wake_valid or wake_pdst or older_flat or dispatch_bypass or incoming_ready2) begin
         for (int s = 0; s < DEPTH; s = s + 1) begin
             select_ps1 = entry[s][SRC2_LSB+PW +: PW];
             select_ps2 = entry[s][SRC2_LSB +: PW];
@@ -90,15 +112,12 @@ module iq_core #(
             ready_candidate[s] = valid_q[s] && select_ready1 &&
                 (select_ready2 || (MEM_QUEUE!=0 && entry[s][STORE_OP_LSB +: 3]>=5));
         end
-        free_temp = 0;
-        for (int s = 0; s < DEPTH; s = s + 1)
-            if (!valid_q[s]) free_temp = free_temp + 1;
-        free_count = CW'(free_temp);
         cand_valid = 0; cand_src2_ready=0;
         begin
             cand_select = 0;
             begin
-                cand_valid=|ready_candidate;
+                cand_valid=(|ready_candidate) || dispatch_bypass;
+                if (dispatch_bypass) cand_src2_ready=incoming_ready2;
                 for (int s=0; s<DEPTH; s=s+1) begin
                     cand_select[s]=ready_candidate[s] && !(|(older[s] & ready_candidate));
                     if (cand_select[s]) cand_src2_ready=data_ready[s];
@@ -106,26 +125,23 @@ module iq_core #(
             end
         end
         // Prepare the first free slot before the dispatch handshake.
-        for (int s = 0; s < DEPTH; s = s+1) begin
-            free_rank[s] = 0;
-            for (int older = 0; older < s; older = older+1)
-                free_rank[s] = free_rank[s] + CW'(!valid_q[older]);
-        end
         begin
-            alloc_select = 0;
             alloc_slot = -1;
             for (int s = 0; s < DEPTH; s = s+1) begin
-                alloc_select[s] = !valid_q[s] && free_rank[s] == 0;
-                if (alloc_select[s]) alloc_slot = s;
+                if (!valid_q[s] && alloc_slot < 0) alloc_slot = s;
             end
         end
     end
-    always @(entry_flat or candidate_mask) begin
+    always @(entry_flat or candidate_mask or dispatch_mask or disp_uop) begin
         cand_uop = 0;
         for (int slot = 0; slot < DEPTH; slot = slot+1)
                 for (int bit_no = 0; bit_no < UOP_BITS; bit_no = bit_no+1)
                     cand_uop[bit_no] |= entry[slot][bit_no] &
                         candidate_mask[(slot)*PAYLOAD_GROUPS+bit_no/16];
+        // The new instruction is youngest; bypass only when no resident entry
+        // can issue. ROB, rename and LSQ still allocate at this dispatch edge.
+        for (integer bit_no=0; bit_no<UOP_BITS; bit_no=bit_no+1)
+            if (dispatch_mask[bit_no/16]) cand_uop[bit_no]=disp_uop[bit_no];
     end
     for (genvar slot = 0; slot < DEPTH; slot = slot+1) begin : g_prepare_entry
         wire [PAYLOAD_GROUPS-1:0] payload_enable;
@@ -163,7 +179,7 @@ module iq_core #(
                 if (cand_take && cand_select[s]) valid_q[s] <= 0;
             begin
                 if (disp_valid && alloc_slot >= 0 && !squash_valid) begin
-                    valid_q[alloc_slot] <= 1;
+                    valid_q[alloc_slot] <= !(dispatch_bypass && cand_take);
                     ps1 = disp_uop[SRC2_LSB+PW +: PW];
                     ps2 = disp_uop[SRC2_LSB +: PW];
                     w1 = disp_src1_ready || ps1 == 0;

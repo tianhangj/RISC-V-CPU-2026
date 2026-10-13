@@ -6,7 +6,7 @@ module branch_ctrl #(
     input logic clock, reset,
     input logic [RW-1:0] rob_head,
     output logic [GEN_WIDTH-1:0] current_gen,
-    output logic [CCW-1:0] cp_free,
+    output wire cp_has_free,
     output logic [CIDW-1:0] cp_alloc_id,
     input logic cp_alloc_valid,
     input logic [CP_ALLOC_BITS-1:0] cp_alloc_payload,
@@ -45,13 +45,12 @@ module branch_ctrl #(
         age = tag - rob_head;
     endfunction
 
+    assign cp_has_free = |(~cp_valid);
     always_comb begin
-        cp_free = 0;
         cp_alloc_id = 0;
         selected = -1;
         for (int c = 0; c < CHECKPOINT_DEPTH; c = c + 1) begin
             if (!cp_valid[c]) begin
-                cp_free = cp_free + 1'b1;
                 if (selected < 0) selected = c;
             end
         end

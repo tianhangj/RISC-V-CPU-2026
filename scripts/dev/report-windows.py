@@ -125,7 +125,8 @@ def main():
     parser.add_argument("--testcases", type=Path, default=ROOT / "testcases")
     parser.add_argument("--test-max-cycles", type=int, default=100_000_000)
     parser.add_argument("--perf-max-cycles", type=int, default=10_000_000)
-    parser.add_argument("--clock-period", type=float, default=5.0)
+    parser.add_argument("--clock-period", type=float, default=1000.0 / 300.0,
+                        help="target clock period in ns (default: 1000/300, 300 MHz)")
     args = parser.parse_args()
     if args.jobs < 1 or any(not 1 <= v < 2**63 for v in (args.test_max_cycles, args.perf_max_cycles)):
         parser.error("jobs and cycle limits must be positive; cycle limits must be below 2^63")

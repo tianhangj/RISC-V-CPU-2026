@@ -12,7 +12,7 @@ module rename #(
     input logic clock, reset, squash_valid,
     input logic [CIDW-1:0] restore_cp_id,
     input logic [CHECKPOINT_DEPTH-1:0] cp_release_mask,
-    input logic [CCW-1:0] cp_free,
+    input logic cp_has_free,
     input logic [CIDW-1:0] cp_alloc_id,
     input logic decode_valid,
     output logic decode_ready,
@@ -20,10 +20,8 @@ module rename #(
     input logic [DECODE_BITS-1:0] decode_uop,
     input logic [ROB_CW-1:0] rob_free,
     input logic [RW-1:0] rob_tail,
-    input logic [AIQ_CW-1:0] alu_iq_free,
-    input logic [MIQ_CW-1:0] mem_iq_free,
-    input logic [LQ_CW-1:0] lq_free,
-    input logic [SQ_CW-1:0] sq_free,
+    input logic alu_iq_has_free, mem_iq_has_free,
+    input logic lq_has_free, sq_has_free,
     input logic [LIDW-1:0] lq_alloc_id,
     input logic [SIDW-1:0] sq_alloc_id,
     output logic disp_valid,
@@ -95,7 +93,9 @@ module rename #(
             if (cp_alloc_valid) last_write_id<=cp_alloc_id;
         end
         for (genvar cp=0; cp<CHECKPOINT_DEPTH; cp=cp+1) begin : g_bank
-            wire write_map=cp_alloc_valid && cp_alloc_id==CIDW'(cp) && !squash_valid;
+            // A free checkpoint bank may be prepared before dispatch. Only
+            // cp_alloc_valid changes its architectural validity and bypass ID.
+            wire write_map=cp_has_free && is_branch && cp_alloc_id==CIDW'(cp);
             sram_fakeram #(.DEPTH(1), .WIDTH(32*PW)) maps (
                 .clk(clock), .en(1'b1),
                 .we(write_map), .wmask(1'b1), .addr(1'b0), .wdata(checkpoint_data),
@@ -135,9 +135,9 @@ module rename #(
     wire is_store=op>=35 && op<=37;
     wire [1:0] kind=is_branch?2'd1:is_load?2'd2:is_store?2'd3:2'd0;
     wire [MIDW-1:0] mem_id=is_store?MIDW'(sq_alloc_id):MIDW'(lq_alloc_id);
-    wire queues_fit=rob_free!=0 && (is_branch?cp_free!=0:1'b1) &&
-        ((is_load || is_store)?mem_iq_free!=0:alu_iq_free!=0) &&
-        (!is_load || lq_free!=0) && (!is_store || sq_free!=0);
+    wire queues_fit=rob_free!=0 && (!is_branch || cp_has_free) &&
+        ((is_load || is_store)?mem_iq_has_free:alu_iq_has_free) &&
+        (!is_load || lq_has_free) && (!is_store || sq_has_free);
     wire fire=disp_valid && disp_ready;
     wire accept=decode_valid && decode_ready;
     wire [2*PRF_SIZE-1:0] rn_control;
@@ -167,10 +167,6 @@ module rename #(
     always @* begin
         disp_src1_ready=psrc1==0 || ready_q[psrc1];
         disp_src2_ready=psrc2==0 || ready_q[psrc2];
-        for (integer w=0; w<WAKE_WIDTH; w=w+1) begin
-            if (wake_valid[w] && wake_pdst[w*PW +: PW]==psrc1) disp_src1_ready=1;
-            if (wake_valid[w] && wake_pdst[w*PW +: PW]==psrc2) disp_src2_ready=1;
-        end
     end
     for (genvar r=0; r<32; r=r+1) begin : g_rat
         if (r==0) begin
