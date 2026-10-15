@@ -19,7 +19,9 @@ TESTCASES ?= $(FRAMEWORK_DIR)/testcases
 BUILD ?= build
 SYNTH_OUT ?= $(BUILD)/synth
 MODE ?= opt
-CLOCK_PERIOD_NS ?= 5.0
+CLOCK_PERIOD_NS ?= 2.0
+ABC_DRIVING_CELL ?= INVx1_ASAP7_75t_R
+ABC_LOAD_FF ?= 5.0
 FILELIST ?= verilog/filelist.f
 PROGRAM ?= program.bin
 EXPECTED ?=
@@ -67,7 +69,8 @@ help:
 	@echo 'make report [IMAGE=cpu2026:latest REPORT_OUT=build/reports JOBS=1]'
 	@echo '  Runs correctness, perf, IPC profiling and synth sequentially in Docker.'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
-	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=5.0 FILELIST=verilog/filelist.f]'
+	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=2.0 FILELIST=verilog/filelist.f]'
+	@echo '  ABC constraints: ABC_DRIVING_CELL=INVx1_ASAP7_75t_R ABC_LOAD_FF=5.0'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
 	@echo 'make clean  (removes BUILD, SYNTH_OUT and code)'
 	@echo 'make fast-test / fast-perf [JOBS=8 TEST_JOBS=4 REUSE_RESULTS=1 FORCE=1]'
@@ -118,6 +121,7 @@ perf:
 synth:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/synth.py" --filelist "$(FILELIST)" --out "$(SYNTH_OUT)" \
 		--mode "$(MODE)" --clock-period "$(CLOCK_PERIOD_NS)" \
+		--abc-driving-cell "$(ABC_DRIVING_CELL)" --abc-load-ff "$(ABC_LOAD_FF)" \
 		--appimage "$(APPIMAGE)" $(if $(YOSYS),--yosys "$(YOSYS)",) \
 		$(if $(ABC),--abc "$(ABC)",) $(if $(STA),--sta "$(STA)",) \
 		$(if $(ASAP7_LIB),--asap7-lib "$(ASAP7_LIB)",)
