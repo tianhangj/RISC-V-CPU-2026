@@ -1,10 +1,11 @@
 module prf #(
+    parameter integer READ_PORTS = 2,
     parameter integer WB_WIDTH = 2,
     parameter integer PRF_SIZE = 48
 ) (
     input logic clock, reset,
-    input logic [2*PW-1:0] rd_addr,
-    output logic [63:0] rd_data,
+    input logic [READ_PORTS*PW-1:0] rd_addr,
+    output logic [READ_PORTS*32-1:0] rd_data,
     input logic [WB_WIDTH-1:0] write_valid,
     input logic [WB_WIDTH*PW-1:0] write_pdst,
     input logic [WB_WIDTH*32-1:0] write_value
@@ -39,7 +40,7 @@ module prf #(
         distribute_write_value(write_value, bank_write_value);
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(PRF_SIZE*2))
         distribute_reset(reset, word_reset);
-    for (genvar p = 0; p < 2; p = p + 1) begin : g_read
+    for (genvar p = 0; p < READ_PORTS; p = p + 1) begin : g_read
         wire [PW-1:0] addr = rd_addr[p*PW +: PW];
         wire [7:0] low_select;
         wire [BANK_COUNT*8-1:0] bank_low_select;

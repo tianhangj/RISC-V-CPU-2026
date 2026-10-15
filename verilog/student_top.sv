@@ -1,4 +1,6 @@
 module student_top #(
+    parameter integer DISPATCH_WIDTH = 1,
+    parameter integer ISSUE_WIDTH = 1,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -46,6 +48,10 @@ module student_top #(
 );
 
     // Reject unsupported configurations during elaboration; valid configurations add no cells.
+    if ((DISPATCH_WIDTH != 1 && DISPATCH_WIDTH != 2) ||
+        (ISSUE_WIDTH != 1 && ISSUE_WIDTH != 2)) begin : g_invalid_width
+        initial $fatal(1, "DISPATCH_WIDTH and ISSUE_WIDTH must be 1 or 2");
+    end
     if (WB_WIDTH < 1 || WB_WIDTH > 3) begin : g_invalid_0
         initial $fatal(1, "WB_WIDTH must be 1, 2 or 3");
     end
@@ -105,7 +111,7 @@ module student_top #(
     localparam integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1;
     localparam integer CIDW = (CHECKPOINT_DEPTH > 1) ? $clog2(CHECKPOINT_DEPTH) : 1;
     localparam integer MIDW = (LIDW > SIDW) ? LIDW : SIDW;
-    localparam integer DCW = 1;
+    localparam integer DCW = $clog2(DISPATCH_WIDTH+1);
     localparam integer ROB_CW = $clog2(ROB_DEPTH + 1);
     localparam integer AIQ_CW = $clog2(IQ_ALU_DEPTH + 1);
     localparam integer MIQ_CW = $clog2(IQ_MEM_DEPTH + 1);
@@ -127,8 +133,8 @@ module student_top #(
     localparam integer BP_TRAIN_BITS = 66;
     localparam integer IF_ID_WIDTH = $clog2(ICACHE_LINE_BYTES/4);
     localparam integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32;
-    localparam integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32;
-    localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32;
+    localparam integer IC_REQ_BITS = GEN_WIDTH + FIDW + 1 + 32;
+    localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + 1 + 32;
     localparam integer LD_REQ_BITS = GEN_WIDTH + LIDW + 32;
     localparam integer WRITE_REQ_BITS = 68;
     localparam integer DC_WORD_W = $clog2(DCACHE_LINE_BYTES/4);
@@ -154,7 +160,7 @@ module student_top #(
     (* keep *) logic st_req_valid, st_req_ready, st_rsp_valid;
     logic [WRITE_REQ_BITS-1:0] st_req_payload;
     logic fetch_valid, fetch_ready, decode_valid, decode_ready;
-    logic [DCW-1:0] fetch_count, decode_count;
+    logic [0:0] fetch_count, decode_count;
     logic [FETCH_BITS-1:0] fetch_packet;
     logic [DECODE_BITS-1:0] decode_uop;
     logic [GEN_WIDTH-1:0] current_gen;
@@ -170,11 +176,11 @@ module student_top #(
     logic [31:0] front_redirect_pc;
     (* keep *) logic disp_valid, disp_ready, disp_fire;
     logic [DCW-1:0] disp_count;
-    logic [ROB_ALLOC_BITS-1:0] disp_rob;
+    logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob;
     logic [ALU_IQ_BITS-1:0] disp_alu;
     logic [MEM_IQ_BITS-1:0] disp_mem;
     logic [MEM_ALLOC_BITS-1:0] disp_lsq;
-    logic  disp_src1_ready, disp_src2_ready;
+    logic [1:0] disp_src1_ready, disp_src2_ready;
     logic  alu_disp_valid, mem_disp_valid;
     logic  alu_disp_prepare, mem_disp_prepare;
     logic [ROB_CW-1:0] rob_free;
@@ -195,8 +201,8 @@ module student_top #(
     wire [PW-1:0] mem_store_psrc;
     logic [ALU_IQ_BITS-1:0] alu_cand_uop;
     logic [MEM_IQ_BITS-1:0] mem_cand_uop;
-    logic [2*PW-1:0] rd_addr;
-    logic [64-1:0] rd_data;
+    logic [2*ISSUE_WIDTH*PW-1:0] rd_addr;
+    logic [64*ISSUE_WIDTH-1:0] rd_data;
     logic  alu_exec_valid, alu_exec_ready;
     logic [ALU_EXEC_BITS-1:0] alu_exec_payload;
     logic mul_exec_valid, mul_exec_ready, mem_exec_valid, mem_exec_ready;
@@ -245,13 +251,24 @@ module student_top #(
         distribute_recovery({squash_valid, squash_tag}, distributed_squash);
     wire [1:0] dispatch_kind = disp_rob[SIDW +: 2];
     wire dispatch_memory = dispatch_kind == 2 || dispatch_kind == 3;
+    if (DISPATCH_WIDTH==1) begin : g_single_dispatch
     assign alu_disp_prepare = !dispatch_memory;
     assign mem_disp_prepare = dispatch_memory;
-    assign alu_disp_valid = disp_fire && !dispatch_memory;
-    assign mem_disp_valid = disp_fire && dispatch_memory;
     assign disp_ready = !distributed_squash[8*(RW+1)+RW] && rob_free != 0 &&
         (dispatch_memory ? mem_iq_has_free : alu_iq_has_free) &&
         (dispatch_kind != 2 || lq_has_free) && (dispatch_kind != 3 || sq_has_free);
+    end else begin : g_dual_dispatch
+        wire [1:0] second_kind=disp_rob[ROB_ALLOC_BITS+SIDW +: 2];
+        wire second_memory=second_kind==2 || second_kind==3;
+        assign alu_disp_prepare=!dispatch_memory || (disp_count==2 && !second_memory);
+        assign mem_disp_prepare=dispatch_memory || (disp_count==2 && second_memory);
+        assign disp_ready=!distributed_squash[8*(RW+1)+RW] && rob_free>=ROB_CW'(disp_count) &&
+            (!alu_disp_prepare || alu_iq_has_free) && (!mem_disp_prepare || mem_iq_has_free) &&
+            ((dispatch_kind!=2 && (disp_count!=2 || second_kind!=2)) || lq_has_free) &&
+            ((dispatch_kind!=3 && (disp_count!=2 || second_kind!=3)) || sq_has_free);
+    end
+    assign alu_disp_valid = disp_fire && alu_disp_prepare;
+    assign mem_disp_valid = disp_fire && mem_disp_prepare;
     assign disp_fire = disp_valid && disp_ready;
 
     branch_predictor #(.BP_ENABLE(BP_ENABLE), .BTB_ENTRIES(BTB_ENTRIES), .BHT_ENTRIES(BHT_ENTRIES)) u_predictor (
@@ -268,9 +285,24 @@ module student_top #(
     decode u_decode (
         .fetch_valid, .fetch_ready, .fetch_count, .fetch_packet,
         .decode_valid, .decode_ready, .decode_count, .decode_uop);
+    if (DISPATCH_WIDTH==1) begin : g_rename_single
+    assign disp_src1_ready[1]=disp_src1_ready[0];
+    assign disp_src2_ready[1]=disp_src2_ready[0];
     rename #(.WAKE_WIDTH(COMPLETION_WIDTH), .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .IQ_MEM_DEPTH(IQ_MEM_DEPTH), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_rename (
         .clock, .reset, .squash_valid(distributed_squash[(0)*(RW+1)+RW]), .restore_cp_id, .cp_release_mask,
         .cp_has_free, .cp_alloc_id, .decode_valid, .decode_ready, .decode_count, .decode_uop,
+        .rob_free, .rob_tail, .alu_iq_has_free, .mem_iq_has_free, .lq_has_free, .sq_has_free,
+        .lq_alloc_id, .sq_alloc_id, .disp_valid, .disp_ready, .disp_count,
+        .disp_rob, .disp_alu, .disp_mem, .disp_lsq,
+        .disp_src1_ready(disp_src1_ready[0]), .disp_src2_ready(disp_src2_ready[0]), .cp_alloc_valid, .cp_alloc_payload,
+        .front_redirect_valid, .front_redirect_pc,
+        .wake_valid(distributed_completion[COMPLETION_WIDTH*PW +: COMPLETION_WIDTH]),
+        .wake_pdst(distributed_completion[0 +: COMPLETION_WIDTH*PW]),
+        .reg_commit_valid, .reg_commit_payload);
+    end else begin : g_rename_dual
+    rename_dual #(.WAKE_WIDTH(COMPLETION_WIDTH), .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_rename (
+        .clock, .reset, .squash_valid(distributed_squash[(0)*(RW+1)+RW]), .restore_cp_id, .cp_release_mask,
+        .cp_has_free, .cp_alloc_id, .decode_valid, .decode_ready, .decode_uop,
         .rob_free, .rob_tail, .alu_iq_has_free, .mem_iq_has_free, .lq_has_free, .sq_has_free,
         .lq_alloc_id, .sq_alloc_id, .disp_valid, .disp_ready, .disp_count,
         .disp_rob, .disp_alu, .disp_mem, .disp_lsq,
@@ -279,7 +311,8 @@ module student_top #(
         .wake_valid(distributed_completion[COMPLETION_WIDTH*PW +: COMPLETION_WIDTH]),
         .wake_pdst(distributed_completion[0 +: COMPLETION_WIDTH*PW]),
         .reg_commit_valid, .reg_commit_payload);
-    rob #(.WB_WIDTH(WB_WIDTH), .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .SQ_DEPTH(SQ_DEPTH)) u_rob (
+    end
+    rob #(.DISPATCH_WIDTH(DISPATCH_WIDTH), .WB_WIDTH(WB_WIDTH), .COMMIT_WIDTH(COMMIT_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .SQ_DEPTH(SQ_DEPTH)) u_rob (
         .clock, .reset, .squash_valid(distributed_squash[(1)*(RW+1)+RW]), .squash_tag(distributed_squash[(1)*(RW+1) +: RW]),
         .disp_fire, .disp_count, .disp_rob, .done_valid, .done_tag,
         .rob_free, .rob_tail, .rob_head, .reg_commit_valid, .reg_commit_payload,
@@ -294,7 +327,7 @@ module student_top #(
     iq_alu #(.WAKE_WIDTH(IQ_WAKE_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .IQ_ALU_DEPTH(IQ_ALU_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_iq_alu (
         .clock, .reset, .squash_valid(distributed_squash[(2)*(RW+1)+RW]), .squash_tag(distributed_squash[(2)*(RW+1) +: RW]), .rob_head(distributed_head[(1)*RW +: RW]),
         .disp_valid(alu_disp_valid), .disp_prepare(alu_disp_prepare), .disp_uop(disp_alu),
-        .disp_src1_ready, .disp_src2_ready,
+        .disp_src1_ready(disp_src1_ready[0]), .disp_src2_ready(disp_src2_ready[0]),
         .wake_valid({early_wake_valid,distributed_completion[WAKE_SINK_BITS+COMPLETION_WIDTH*PW +: COMPLETION_WIDTH]}),
         .wake_pdst({early_wake_pdst,distributed_completion[WAKE_SINK_BITS +: COMPLETION_WIDTH*PW]}),
         .alu_iq_has_free, .cand_valid(alu_cand_valid), .cand_uop(alu_cand_uop),
@@ -302,12 +335,12 @@ module student_top #(
     iq_mem #(.WAKE_WIDTH(IQ_WAKE_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .IQ_MEM_DEPTH(IQ_MEM_DEPTH), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH)) u_iq_mem (
         .clock, .reset, .squash_valid(distributed_squash[(3)*(RW+1)+RW]), .squash_tag(distributed_squash[(3)*(RW+1) +: RW]), .rob_head(distributed_head[(2)*RW +: RW]),
         .disp_valid(mem_disp_valid), .disp_prepare(mem_disp_prepare), .disp_uop(disp_mem),
-        .disp_src1_ready, .disp_src2_ready,
+        .disp_src1_ready(disp_src1_ready[1]), .disp_src2_ready(disp_src2_ready[1]),
         .wake_valid({early_wake_valid,distributed_completion[2*WAKE_SINK_BITS+COMPLETION_WIDTH*PW +: COMPLETION_WIDTH]}),
         .wake_pdst({early_wake_pdst,distributed_completion[2*WAKE_SINK_BITS +: COMPLETION_WIDTH*PW]}),
         .mem_iq_has_free, .cand_valid(mem_cand_valid), .cand_src2_ready(mem_cand_src2_ready), .cand_uop(mem_cand_uop),
         .cand_take(mem_cand_take));
-    issue #(.ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_issue (
+    issue #(.ISSUE_WIDTH(ISSUE_WIDTH), .ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .LQ_DEPTH(LQ_DEPTH), .SQ_DEPTH(SQ_DEPTH), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_issue (
         .clock, .reset, .squash_valid, .squash_tag, .rob_head,
         .alu_cand_valid, .alu_cand_uop, .alu_cand_take,
         .mem_cand_valid, .mem_cand_src2_ready, .mem_cand_uop, .mem_cand_take, .rd_addr, .rd_data,
@@ -318,7 +351,7 @@ module student_top #(
         .alu_exec_valid, .alu_exec_ready, .alu_exec_payload,
         .mul_exec_valid, .mul_exec_ready, .mul_exec_payload,
         .mem_exec_valid, .mem_exec_preview_valid, .mem_exec_ready, .mem_exec_payload);
-    prf #(.WB_WIDTH(WB_WIDTH), .PRF_SIZE(PRF_SIZE)) u_prf (
+    prf #(.READ_PORTS(2*ISSUE_WIDTH), .WB_WIDTH(WB_WIDTH), .PRF_SIZE(PRF_SIZE)) u_prf (
         .clock, .reset, .rd_addr, .rd_data, .write_valid, .write_pdst, .write_value);
         alu #(.ROB_DEPTH(ROB_DEPTH), .PRF_SIZE(PRF_SIZE), .CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) u_alu (
             .clock, .reset, .squash_valid(distributed_squash[9*(RW+1)+RW]), .squash_tag(distributed_squash[9*(RW+1) +: RW]), .rob_head(distributed_head[7*RW +: RW]),

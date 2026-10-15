@@ -1,4 +1,5 @@
 module rob #(
+    parameter integer DISPATCH_WIDTH = 1,
     parameter integer WB_WIDTH = 2,
     parameter integer COMMIT_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -10,7 +11,7 @@ module rob #(
     input logic [TAG_BITS-1:0] squash_tag,
     input logic disp_fire,
     input logic [DCW-1:0] disp_count,
-    input logic [ROB_ALLOC_BITS-1:0] disp_rob,
+    input logic [DISPATCH_WIDTH*ROB_ALLOC_BITS-1:0] disp_rob,
     input logic [WB_WIDTH-1:0] done_valid,
     input logic [WB_WIDTH*TAG_BITS-1:0] done_tag,
     output logic [ROB_CW-1:0] rob_free,
@@ -25,7 +26,7 @@ module rob #(
     localparam integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1;
     localparam integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1;
     localparam integer SIDW = (SQ_DEPTH > 1) ? $clog2(SQ_DEPTH) : 1;
-    localparam integer DCW = 1;
+    localparam integer DCW = $clog2(DISPATCH_WIDTH+1);
     localparam integer ROB_CW = $clog2(ROB_DEPTH + 1);
     localparam integer TAG_BITS = RW;
     localparam integer ROB_ALLOC_BITS = PW + 2 + SIDW;
@@ -47,9 +48,34 @@ module rob #(
     assign rob_head = head_q;
     assign rob_tail = tail_q;
     assign rob_free = ROB_DEPTH - count_q;
+    if (DISPATCH_WIDTH==1) begin : g_single_alloc
     (* keep_hierarchy *) payload_ram #(.DEPTH(ROB_DEPTH), .WIDTH(ROB_ALLOC_BITS), .READ_PORTS(COMMIT_WIDTH)) metadata(
         .clock(clock), .reset(reset), .write_valid(rob_free!=0), .write_addr(tail_q),
         .write_data(disp_rob), .read_addr(metadata_addr), .read_data(metadata_data));
+    end else begin : g_dual_alloc
+        // Consecutive tags have opposite parity, so each SRAM bank still
+        // needs only one write port. The read ports retain program order.
+        localparam integer BW=(ROB_DEPTH>2)?$clog2(ROB_DEPTH/2):1;
+        wire [COMMIT_WIDTH*ROB_ALLOC_BITS-1:0] bank_data [0:1];
+        for (genvar bank=0; bank<2; bank=bank+1) begin : g_bank
+            wire lane=tail_q[0]!=1'(bank);
+            wire [RW-1:0] write_tag=tail_q+RW'(lane);
+            wire [COMMIT_WIDTH*BW-1:0] read_addr;
+            for (genvar port=0; port<COMMIT_WIDTH; port=port+1) begin : g_addr
+                assign read_addr[port*BW +: BW]=BW'(metadata_addr[port*RW +: RW] >> 1);
+            end
+            (* keep_hierarchy *) payload_ram #(.DEPTH(ROB_DEPTH/2), .WIDTH(ROB_ALLOC_BITS), .READ_PORTS(COMMIT_WIDTH)) metadata (
+                .clock(clock), .reset(reset), .write_valid(rob_free>ROB_CW'(lane)),
+                .write_addr(BW'(write_tag >> 1)),
+                .write_data(disp_rob[int'(lane)*ROB_ALLOC_BITS +: ROB_ALLOC_BITS]),
+                .read_addr(read_addr), .read_data(bank_data[bank]));
+        end
+        for (genvar port=0; port<COMMIT_WIDTH; port=port+1) begin : g_read
+            assign metadata_data[port*ROB_ALLOC_BITS +: ROB_ALLOC_BITS]=
+                metadata_addr[port*RW]?bank_data[1][port*ROB_ALLOC_BITS +: ROB_ALLOC_BITS]:
+                bank_data[0][port*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
+        end
+    end
     for (genvar lane=0; lane<COMMIT_WIDTH; lane=lane+1) begin : g_retire_metadata
         assign metadata_addr[lane*RW +: RW]=head_q+RW'(lane);
         assign retire_alloc[lane]=metadata_data[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
@@ -108,9 +134,9 @@ module rob #(
                     completed[done_tag[w*TAG_BITS +: TAG_BITS]] <= 1;
             end
             if (disp_fire && !squash_valid) begin
-                begin
-                    if (0 < disp_count) begin
-                        completed[(tail_q + 0) % ROB_DEPTH] <= 0;
+                for (int lane=0; lane<DISPATCH_WIDTH; lane=lane+1) begin
+                    if (lane < disp_count) begin
+                        completed[(tail_q + lane) % ROB_DEPTH] <= 0;
                     end
                 end
             end

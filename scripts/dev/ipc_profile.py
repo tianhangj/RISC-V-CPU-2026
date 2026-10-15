@@ -77,6 +77,9 @@ def main():
             cycles = int(cycle_match[1])
             instructions = json.loads((case / "metrics.json").read_text())["dynamic_instructions"]
             profile = {n: int(v) for n, v in re.findall(r"(\w+)=(\d+)", counters[1])}
+            multi = re.search(r"^CPU2026 multi_width (.+)$", run.stderr, re.M)
+            if multi:
+                profile.update({n: int(v) for n, v in re.findall(r"(\w+)=(\d+)", multi[1])})
             branches = parse_statistics(run.stderr)
             summary = summarize(branches)
             row = {"case": case.name, "status": "passed", "instructions": instructions,

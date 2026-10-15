@@ -72,6 +72,12 @@ module icache #(
     wire same_fill = (req_addr >> OFFSET_BITS) == (fill_addr >> OFFSET_BITS);
     wire request_fire = ic_req_valid && ic_req_ready;
     wire hit_fire = request_fire && hit_found;
+    // Miss allocation follows branch recovery on the same combinational path.
+    // Bound each retained buffer to a small group of capture/reset bits.
+    wire [7:0] fill_capture;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(8)) distribute_fill_capture (
+        request_fire && !hit_found && !fill_busy, fill_capture);
+    wire [31:0] new_fill_addr=(req_addr >> OFFSET_BITS) << OFFSET_BITS;
     wire fill_response = fill_busy && fill_installed && waiter_valid && !hit_pending;
     wire [IF_ID_WIDTH-1:0] return_word = if_rsp_payload[32 +: IF_ID_WIDTH];
     wire [GEN_WIDTH-1:0] return_gen = if_rsp_payload[32+IF_ID_WIDTH +: GEN_WIDTH];
@@ -180,18 +186,15 @@ module icache #(
                 waiter_id <= req_id;
                 waiter_count <= req_count;
                 waiter_word <= req_word;
-                if (!fill_busy) begin
-                    fill_busy <= 1;
-                    fill_installed <= 0;
-                    fill_addr <= (req_addr >> OFFSET_BITS) << OFFSET_BITS;
-                    fill_set <= req_set;
-                    fill_way <= victim_way;
-                    fill_gen <= req_gen;
-                    sent_count <= 0;
-                    received_count <= 0;
-                    line_valid[int'(req_set)*ICACHE_WAYS+int'(victim_way)] <= 0;
-                end
             end
+            if (fill_capture[0]) begin fill_busy<=1; fill_installed<=0; end
+            if (fill_capture[1]) fill_addr[15:0]<=new_fill_addr[15:0];
+            if (fill_capture[2]) fill_addr[31:16]<=new_fill_addr[31:16];
+            if (fill_capture[3]) fill_set<=req_set;
+            if (fill_capture[4]) fill_way<=victim_way;
+            if (fill_capture[5]) fill_gen<=req_gen;
+            if (fill_capture[6]) begin sent_count<=0; received_count<=0; end
+            if (fill_capture[7]) line_valid[int'(req_set)*ICACHE_WAYS+int'(victim_way)]<=0;
             if (if_req_valid && if_req_ready) sent_count <= sent_count + 1'b1;
             if (if_rsp_valid && fill_busy && !fill_installed && return_gen == fill_gen) begin
                 fill_data[int'(return_word)*32 +: 32] <= if_rsp_payload[31:0];

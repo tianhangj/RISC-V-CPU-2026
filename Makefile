@@ -36,13 +36,17 @@ PARAMETERS ?=
 IMAGE ?= cpu2026:latest
 REPORT_OUT ?= $(BUILD)/reports
 LATENCY ?= 10
+FAST_BUILD ?= $(BUILD)/fast
+TEST_JOBS ?= 4
+REUSE_RESULTS ?= 0
+FORCE ?= 0
 WAVE ?=
 LOG ?=
 ifneq ($(strip $(BLACKBOXES)),)
 $(error BLACKBOXES has been removed; instantiate sram_fakeram instead)
 endif
 
-.PHONY: code help build run test branch-accuracy ipc-profile report perf synth clean
+.PHONY: code help build run test branch-accuracy ipc-profile report perf synth clean fast-build fast-test fast-perf fast-synth
 
 # OJ always builds RTL and collects ./code. SIM affects local run/test/perf only.
 code:
@@ -66,6 +70,8 @@ help:
 	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=5.0 FILELIST=verilog/filelist.f]'
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
 	@echo 'make clean  (removes BUILD, SYNTH_OUT and code)'
+	@echo 'make fast-test / fast-perf [JOBS=8 TEST_JOBS=4 REUSE_RESULTS=1 FORCE=1]'
+	@echo 'make fast-synth: reuse verified synthesis results; FORCE=1 reruns all phases'
 	@echo 'make / make code: compile RTL and produce ./code for OJ'
 
 build:
@@ -115,6 +121,22 @@ synth:
 		--appimage "$(APPIMAGE)" $(if $(YOSYS),--yosys "$(YOSYS)",) \
 		$(if $(ABC),--abc "$(ABC)",) $(if $(STA),--sta "$(STA)",) \
 		$(if $(ASAP7_LIB),--asap7-lib "$(ASAP7_LIB)",)
+
+fast-build fast-test fast-perf:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/fast.py" $(patsubst fast-%,%,$@) \
+		--filelist "$(FILELIST)" --out "$(FAST_BUILD)" --jobs $(JOBS) \
+		--appimage "$(APPIMAGE)" --cxx "$(CXX)" --ar "$(AR)" --make "$(BUILD_MAKE)" \
+		$(if $(VERILATOR),--verilator "$(VERILATOR)",) \
+		--testcases "$(TESTCASES)" --max-cycles $(MAX_CYCLES) --latency $(LATENCY) --test-jobs $(TEST_JOBS) \
+		$(if $(SIM),--sim "$(SIM)",) $(if $(Case),--case "$(Case)",) \
+		$(if $(filter 1,$(REUSE_RESULTS)),--reuse-results,) $(if $(filter 1,$(FORCE)),--force,)
+
+fast-synth:
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/fast.py" synth --filelist "$(FILELIST)" --out "$(SYNTH_OUT)" \
+		--mode "$(MODE)" --clock-period "$(CLOCK_PERIOD_NS)" --appimage "$(APPIMAGE)" \
+		$(if $(YOSYS),--yosys "$(YOSYS)",) $(if $(ABC),--abc "$(ABC)",) \
+		$(if $(STA),--sta "$(STA)",) $(if $(ASAP7_LIB),--asap7-lib "$(ASAP7_LIB)",) \
+		$(if $(filter 1,$(FORCE)),--force,)
 
 clean:
 	rm -rf -- "$(BUILD)" "$(SYNTH_OUT)"

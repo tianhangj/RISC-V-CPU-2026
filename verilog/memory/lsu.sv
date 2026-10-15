@@ -55,6 +55,9 @@ module lsu #(
     localparam integer LD_RSP_BITS = GEN_WIDTH + LIDW + 32;
     localparam integer WRITE_REQ_BITS = 68;
     localparam integer OCW = $clog2(LOAD_OUTSTANDING + 1);
+    wire [4:0] dispatch_capture;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(5)) distribute_dispatch_capture (
+        disp_valid && !squash_valid,dispatch_capture);
     logic [LQ_DEPTH-1:0] lq_valid;
     logic [SQ_DEPTH-1:0] sq_valid, sq_addr_ready, sq_reported;
     logic [SQ_DEPTH-1:0] sq_committed, sq_data_ready;
@@ -480,23 +483,22 @@ module lsu #(
                         lq_valid[chosen_result] <= 0;
                 end
             end
-            if (disp_valid && !squash_valid) begin
-                    if (disp_lsq[MEM_ALLOC_BITS-1]) begin
+            if (dispatch_capture[0] && disp_lsq[MEM_ALLOC_BITS-1]) begin
                         sq_valid[disp_lsq[PW+TAG_BITS +: MIDW]] <= 1;
                         sq_addr_ready[disp_lsq[PW+TAG_BITS +: MIDW]] <= 0;
                         sq_reported[disp_lsq[PW+TAG_BITS +: MIDW]] <= 0;
                         sq_data_ready[disp_lsq[PW+TAG_BITS +: MIDW]] <= 0;
-                        sq_rob[disp_lsq[PW+TAG_BITS +: MIDW]] <=
-                            disp_lsq[PW +: TAG_BITS];
-                    end else begin
+            end
+            if (dispatch_capture[1] && disp_lsq[MEM_ALLOC_BITS-1])
+                sq_rob[disp_lsq[PW+TAG_BITS +: MIDW]]<=disp_lsq[PW +: TAG_BITS];
+            if (dispatch_capture[2] && !disp_lsq[MEM_ALLOC_BITS-1]) begin
                         lq_valid[disp_lsq[PW+TAG_BITS +: MIDW]] <= 1;
                         lq_state[disp_lsq[PW+TAG_BITS +: MIDW]] <= 0;
-                        lq_rob[disp_lsq[PW+TAG_BITS +: MIDW]] <=
-                            disp_lsq[PW +: TAG_BITS];
-                        lq_pdst[disp_lsq[PW+TAG_BITS +: MIDW]] <=
-                            disp_lsq[PW-1:0];
-                    end
-                end
+            end
+            if (dispatch_capture[3] && !disp_lsq[MEM_ALLOC_BITS-1])
+                lq_rob[disp_lsq[PW+TAG_BITS +: MIDW]]<=disp_lsq[PW +: TAG_BITS];
+            if (dispatch_capture[4] && !disp_lsq[MEM_ALLOC_BITS-1])
+                lq_pdst[disp_lsq[PW+TAG_BITS +: MIDW]]<=disp_lsq[PW-1:0];
             if (squash_valid) begin
                 for (int l = 0; l < LQ_DEPTH; l = l + 1)
                     if (lq_valid[l] && (lq_rob[l]-rob_head) > (squash_tag-rob_head)) lq_valid[l] <= 0;

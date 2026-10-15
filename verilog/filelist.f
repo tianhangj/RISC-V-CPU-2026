@@ -23,4 +23,5 @@ backend/iq_mem.sv
 backend/issue.sv
 memory/lsu.sv
 backend/rename.sv
+backend/rename_dual.sv
 student_top.sv

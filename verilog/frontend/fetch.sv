@@ -60,8 +60,14 @@ module fetch #(
     wire [31:0] request_npc=offer_valid?offer_npc:create_npc;
     wire  request_taken=offer_valid?offer_taken:create_taken;
     wire request_ram=request_pc[31:28]==0;
+    wire [3:0] frontend_run;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4)) distribute_frontend_run (
+        !reset && !fetch_redirect_valid,frontend_run);
+    wire [FETCH_QUEUE_DEPTH:0] frontend_clear;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(FETCH_QUEUE_DEPTH+1)) distribute_frontend_clear (
+        reset || fetch_redirect_valid,frontend_clear);
     wire req_fire=ic_req_valid && ic_req_ready;
-    wire create_fire=!reset && !fetch_redirect_valid && request_count!=0 &&
+    wire create_fire=frontend_run[0] && request_count!=0 &&
         (!request_ram || req_fire);
     wire [DCW-1:0] rsp_count=ic_rsp_payload[32 +: DCW];
     wire [FIDW-1:0] rsp_id=ic_rsp_payload[32+DCW +: FIDW];
@@ -84,7 +90,7 @@ module fetch #(
         .read_addr(head_q), .read_data(head_inst));
     wire out_fire=fetch_valid && fetch_ready;
     wire direct_fire=output_count==0 && out_fire;
-    wire load_output=!reset && !fetch_redirect_valid && output_count<2 && ready_count!=0 && !direct_fire;
+    wire load_output=frontend_run[1] && output_count<2 && ready_count!=0 && !direct_fire;
     wire drain_output=load_output || direct_fire;
     reg [FETCH_BITS-1:0] read_packet;
     reg read_ready;
@@ -94,11 +100,18 @@ module fetch #(
         pc_increment #(.WORDS(0+1)) inc_next(.pc(next_pc),.next_pc(lane_next_pc));
     end
     assign lookup_pc=next_pc;
-    assign ic_req_valid=!reset && !fetch_redirect_valid && request_count!=0 && request_ram;
+    assign ic_req_valid=frontend_run[2] && request_count!=0 && request_ram;
     assign ic_req_payload={fetch_gen,tail_q,request_count,request_pc};
-    assign fetch_valid=!reset && !fetch_redirect_valid && (output_count!=0 || (ready_count!=0));
-    assign fetch_count=(output_count==0)?ready_count:out_count[out_head];
-    assign fetch_packet=(output_count==0)?ready_packet:out_packet[out_head];
+    assign fetch_valid=frontend_run[3] && (output_count!=0 || (ready_count!=0));
+    // Keep the output-empty predicate off the wide packet mux's full fanout.
+    wire [6:0] packet_bypass;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(7)) distribute_packet_bypass (
+        output_count==0,packet_bypass);
+    assign fetch_count=packet_bypass[6]?ready_count:out_count[out_head];
+    for (genvar chunk=0; chunk<6; chunk=chunk+1) begin : g_output_packet
+        assign fetch_packet[chunk*16 +: 16]=packet_bypass[chunk]?
+            ready_packet[chunk*16 +: 16]:out_packet[out_head][chunk*16 +: 16];
+    end
     always @* begin
         create_count=0; create_next_pc=next_pc; stop_create=0;
         create_npc=0; create_taken=0;
@@ -139,6 +152,18 @@ module fetch #(
         end
     end
     localparam integer OUTPUT_GROUPS=(FETCH_BITS+15)/16;
+    wire [6:0] offer_capture;
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(7)) distribute_offer_capture (
+        frontend_run[0] && !create_fire && !offer_valid && ic_req_valid,offer_capture);
+    always @(posedge clock)
+        if (offer_capture[0]) begin offer_count<=create_count; offer_taken<=create_taken; end
+    for (genvar half=0; half<2; half=half+1) begin : g_offer_capture
+        always @(posedge clock) begin
+            if (offer_capture[1+half]) offer_pc[half*16 +: 16]<=next_pc[half*16 +: 16];
+            if (offer_capture[3+half]) offer_next_pc[half*16 +: 16]<=create_next_pc[half*16 +: 16];
+            if (offer_capture[5+half]) offer_npc[half*16 +: 16]<=create_npc[half*16 +: 16];
+        end
+    end
     for (genvar slot=0; slot<2; slot=slot+1) begin : g_output_capture
         wire [OUTPUT_GROUPS-1:0] capture;
         (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(OUTPUT_GROUPS)) distribute(
@@ -151,7 +176,7 @@ module fetch #(
         end
     end
     always @(posedge clock) begin
-        if (reset || fetch_redirect_valid) begin
+        if (frontend_clear[FETCH_QUEUE_DEPTH]) begin
             head_q<=0; tail_q<=0; count_q<=0; outstanding_q<=0;
             offer_valid<=0; out_head<=0; out_tail<=0; output_count<=0;
             next_pc<=reset?RESET_PC:fetch_redirect_payload[GEN_WIDTH +: 32];
@@ -171,14 +196,13 @@ module fetch #(
             if (create_fire) begin
                 tail_q<=tail_q+FIDW'(request_count); next_pc<=request_next_pc; offer_valid<=0;
             end else if (!offer_valid && ic_req_valid) begin
-                offer_valid<=1; offer_count<=create_count; offer_pc<=next_pc;
-                offer_next_pc<=create_next_pc; offer_npc<=create_npc; offer_taken<=create_taken;
+                offer_valid<=1;
             end
         end
     end
     for (genvar slot=0; slot<FETCH_QUEUE_DEPTH; slot=slot+1) begin : g_slot
         always @(posedge clock) begin
-            if (reset || fetch_redirect_valid) state[slot]<=0;
+            if (frontend_clear[slot]) state[slot]<=0;
             else begin
                 begin
                     if (rsp_current && 0<rsp_count && state[slot]==2 &&

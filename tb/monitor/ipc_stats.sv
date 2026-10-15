@@ -2,7 +2,7 @@
 module ipc_stats_monitor (
     input wire clock, reset,
     input wire [31:0] issue_count, retire_count, dispatch_count,
-    input wire [31:0] issue_limit, commit_limit, wb_count, wb_limit,
+    input wire [31:0] issue_limit, dispatch_limit, commit_limit, wb_count, wb_limit,
     input wire any_candidate, fetch_starved, rename_blocked,
     input wire rob_full, alu_full, mem_full, cp_full, lsq_full,
     input wire head_store_wait, head_load_wait, squash,
@@ -13,22 +13,26 @@ module ipc_stats_monitor (
     reg [63:0] fetch_empty, rename_stall, rob_stall, alu_stall, mem_stall;
     reg [63:0] cp_stall, lsq_stall, store_head, load_head, mispredict;
     reg [63:0] cache_misses, cache_busy_cycles, store_hits, loads, cache_stall, wb_stall;
+    reg [63:0] dual_issue_cycles, dual_dispatch_cycles;
     always @(posedge clock) begin
         if (reset) begin
+            dual_issue_cycles=0; dual_dispatch_cycles=0;
             cycles = 0; issued = 0; retired = 0; dispatched = 0;
             no_candidate = 0; issue_blocked = 0; fetch_empty = 0; rename_stall = 0;
             rob_stall = 0; alu_stall = 0; mem_stall = 0; cp_stall = 0; lsq_stall = 0;
             store_head = 0; load_head = 0; mispredict = 0; cache_misses = 0;
             cache_busy_cycles = 0; store_hits = 0; loads = 0; cache_stall = 0; wb_stall = 0;
         end else begin
-            if (issue_count>issue_limit) $fatal(1,"CPU exceeded single issue");
-            if (dispatch_count>1) $fatal(1,"CPU exceeded single dispatch");
+            if (issue_count>issue_limit) $fatal(1,"CPU exceeded issue width");
+            if (dispatch_count>dispatch_limit) $fatal(1,"CPU exceeded dispatch width");
             if (retire_count>commit_limit) $fatal(1,"CPU exceeded commit width");
             if (wb_count>wb_limit) $fatal(1,"CPU exceeded writeback width");
             cycles = cycles+1;
             issued = issued+64'(issue_count);
             retired = retired+64'(retire_count);
             dispatched = dispatched+64'(dispatch_count);
+            if (issue_count==2) dual_issue_cycles=dual_issue_cycles+1;
+            if (dispatch_count==2) dual_dispatch_cycles=dual_dispatch_cycles+1;
             if (issue_count == 0 && !any_candidate) no_candidate = no_candidate+1;
             if (issue_count == 0 && any_candidate) issue_blocked = issue_blocked+1;
             if (fetch_starved) fetch_empty = fetch_empty+1;
@@ -50,6 +54,8 @@ module ipc_stats_monitor (
         end
     end
     final begin
+        $fdisplay(32'h80000002,"CPU2026 multi_width dual_issue_cycles=%0d dual_dispatch_cycles=%0d",
+            dual_issue_cycles,dual_dispatch_cycles);
         $fdisplay(32'h80000002,
             "CPU2026 ipc_profile cycles=%0d issued=%0d retired=%0d dispatched=%0d no_candidate=%0d issue_blocked=%0d fetch_empty=%0d rename_stall=%0d rob_stall=%0d alu_stall=%0d mem_stall=%0d cp_stall=%0d lsq_stall=%0d store_head=%0d load_head=%0d mispredict=%0d cache_misses=%0d cache_busy_cycles=%0d store_hits=%0d loads=%0d cache_stall=%0d wb_stall=%0d",
             cycles, issued, retired, dispatched, no_candidate, issue_blocked,
@@ -62,7 +68,7 @@ endmodule
 bind student_top ipc_stats_monitor u_ipc_stats (
     .clock(clock), .reset(reset),
     .issue_count(32'($countones(alu_cand_take))+32'(mem_cand_take)),
-    .issue_limit(32'd1), .commit_limit(32'(COMMIT_WIDTH)),
+    .issue_limit(32'(ISSUE_WIDTH)), .dispatch_limit(32'(DISPATCH_WIDTH)), .commit_limit(32'(COMMIT_WIDTH)),
     .wb_count(32'($countones(done_valid))), .wb_limit(32'(WB_WIDTH)),
     .retire_count(32'(u_rob.retire_count)),
     .dispatch_count(disp_fire ? 32'(disp_count) : 32'd0),
