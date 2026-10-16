@@ -1,12 +1,13 @@
 module branch_predictor #(
+    parameter integer LOOKUP_WIDTH = 1,
     parameter integer BP_ENABLE = 1,
     parameter integer BTB_ENTRIES = 32,
     parameter integer BHT_ENTRIES = 256
 ) (
     input logic clock, reset,
     input logic [31:0] lookup_pc,
-    output wire pred_taken,
-    output wire [31:0] pred_npc,
+    output wire [LOOKUP_WIDTH-1:0] pred_taken,
+    output wire [32*LOOKUP_WIDTH-1:0] pred_npc,
     // Events are packed in increasing ROB age by branch_ctrl.
     input logic train_valid,
     input logic [BP_TRAIN_BITS-1:0] train_payload
@@ -66,13 +67,13 @@ module branch_predictor #(
         end
     end
 
-    begin : g_lookup
+    for (genvar lane=0; lane<LOOKUP_WIDTH; lane=lane+1) begin : g_lookup
         wire [31:0] pc, sequential_pc;
         begin : g_base_pc
-            assign pc = lookup_pc;
+            pc_increment #(.WORDS(lane)) increment_pc (.pc(lookup_pc), .next_pc(pc));
         end
         (* keep_hierarchy, keep *) pc_increment #(.WORDS(1)) increment_next (
-            .pc(lookup_pc), .next_pc(sequential_pc));
+            .pc(pc), .next_pc(sequential_pc));
         wire [BIW-1:0] bi = pc[2 +: BIW];
         wire [HIW-1:0] hi = pc[2 +: HIW] ^
             HIW'(global_history);
@@ -104,9 +105,9 @@ module branch_predictor #(
         wire last_selected=last_train_valid && last_train_payload[36 +: BIW]==bi;
         wire last_hit=last_train_payload[65:34]==pc &&
             (!last_train_payload[33] || direction);
-        assign pred_taken = BP_ENABLE != 0 && pc[31:28] == 0 &&
+        assign pred_taken[lane] = BP_ENABLE != 0 && pc[31:28] == 0 &&
             (last_selected?last_hit:(|hit));
-        assign pred_npc[31:0] = pred_taken ?
+        assign pred_npc[lane*32 +: 32] = pred_taken[lane] ?
             (last_selected?last_train_payload[31:0]:target):sequential_pc;
     end
 

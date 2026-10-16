@@ -1,6 +1,6 @@
 # 当前实现与接口约定
 
-本文件描述 `verilog/filelist.f` 中的实际实现，是 RTL 接口、参数和开发流程的维护入口。实现为 **RV32IM、可配置单/双分派、单/双发射、乱序执行、顺序提交**；写回和提交宽度独立配置。默认 `DISPATCH_WIDTH=1, ISSUE_WIDTH=1`。RTL 使用 SystemVerilog 2005，构建器显式指定 `1800-2005`。存储器由官方 `scripts/ram/sram_fakeram.sv` 提供，构建与综合脚本负责加入它。
+本文件描述 `verilog/filelist.f` 中的实际实现，是 RTL 接口、参数和开发流程的维护入口。实现为 **RV32IM、可配置单/双分派、单/双发射、乱序执行、顺序提交**；写回和提交宽度独立配置。默认 `DISPATCH_WIDTH=2, ISSUE_WIDTH=2`。RTL 使用 SystemVerilog 2005，构建器显式指定 `1800-2005`。存储器由官方 `scripts/ram/sram_fakeram.sv` 提供，构建与综合脚本负责加入它。
 
 ## 1. 文件布局与职责
 
@@ -11,9 +11,9 @@
 | 同上 | `decode.sv`、`branch_predictor.sv` | 组合译码；BTB、BHT 与全局历史预测 |
 | `verilog/backend/` | `rename.sv`、`rename_dual.sv`、`prf.sv` | 单/双分派 RAT、物理寄存器分配、就绪位、检查点；物理寄存器值 |
 | 同上 | `iq_core.sv`、`iq_alu.sv`、`iq_mem.sv` | 共用年龄关系、唤醒和选择；ALU 与访存队列适配 |
-| 同上 | `issue.sv` | 单宽按年龄选一个 IQ 候选；双宽同时捕获算术与访存候选，保持执行单元入口 |
+| 同上 | `issue.sv` | 候选仲裁后的操作数读取与保持，ALU/MUL/MEM 入口及完成旁路 |
 | 同上 | `wb_arb.sv`、`rob.sv`、`branch_ctrl.sv` | 写回仲裁、顺序提交、Store 授权；预测校验、恢复和训练 |
-| `verilog/execute/` | `alu.sv`、`mul_div.sv` | 整数/控制流；乘除法 |
+| `verilog/execute/` | `alu.sv`、`mul_div.sv` | 主整数/控制流、辅助整数与乘除法 |
 | `verilog/memory/` | `lsu.sv`、`dcache.sv` | 地址生成、LQ/SQ、Store 提交队列、转发；数据缓存 |
 | 同上 | `data_prefetch.sv`、`axi_bridge.sv` | 三槽下一行预取；读写事务队列及外部总线 |
 | `verilog/common/` | `pc_increment.sv`、`word_adder.sv`、`word_compare.sv`、`signal_fanout.sv`、`payload_ram.sv` | 地址增量、分组运算、控制信号分发及多读口 payload SRAM |
@@ -30,13 +30,13 @@
 
 | 参数 | 默认 | 支持范围 / 约束 |
 | --- | ---: | --- |
-| `DISPATCH_WIDTH` | 1 | 1、2；每周期按程序顺序分配的 ROB 项数上限 |
-| `ISSUE_WIDTH` | 1 | 1、2；每周期捕获 IQ 候选数上限，与分派/写回/提交宽度独立 |
+| `DISPATCH_WIDTH` | 2 | 1、2；取指、预测、译码宽度及每周期有序分配 ROB 项数上限 |
+| `ISSUE_WIDTH` | 2 | 1、2；每周期捕获 IQ 候选数上限，与分派/写回/提交宽度独立 |
 | `WB_WIDTH` | 2 | 1、2、3；物理写口与 ROB 完成通道数 |
 | `COMMIT_WIDTH` | 2 | 1 至 `ROB_DEPTH`；顺序提交上限 |
 | `ROB_DEPTH` | 32 | 不小于 2 的 2 次幂 |
 | `PRF_SIZE` | 56 | 大于 32；可非 2 次幂 |
-| `IQ_ALU_DEPTH` / `IQ_MEM_DEPTH` | 7 / 4 | 正整数；可非 2 次幂 |
+| `IQ_ALU_DEPTH` / `IQ_MEM_DEPTH` | 7 / 4 | 正整数；每个算术 IQ / 访存 IQ 的容量，可非 2 次幂 |
 | `LQ_DEPTH` | 8 | 正整数；可非 2 次幂 |
 | `SQ_DEPTH` | 8 | 不小于 2 的 2 次幂；提交 FIFO 使用循环下标 |
 | `CHECKPOINT_DEPTH` | 4 | 正整数；可非 2 次幂 |
@@ -55,13 +55,13 @@
 
 非法顶层组合在 elaboration/仿真初始化时报错。合法组合不会产生这些检查的硬件。表中范围表达结构约束；组合的实际面积和仿真成本随容量增长。
 
-两个宽度独立支持 `(1,1)`、`(1,2)`、`(2,1)`、`(2,2)`。取指、I-cache 与组合 decode 始终每周期一条，fetch/decode 的 count 仍为 1 位。分派 count 宽度为 `DCW=ceil(log2(DISPATCH_WIDTH+1))`，有效分派包的 count 为 1 或 2；无效周期不据此分配。
+两个宽度独立支持 `(1,1)`、`(1,2)`、`(2,1)`、`(2,2)`。取指、I-cache 响应与组合 decode 宽度跟随 `DISPATCH_WIDTH`，各通道 count 宽度为 `DCW=ceil(log2(DISPATCH_WIDTH+1))`。有效包是从 lane 0 开始的连续前缀，双宽时 count 为 1 或 2；预测跳转和缓存行末尾截断取指包。
 
-双分派由 `rename_dual` 的两项译码缓冲形成有序前缀，不等待凑满两条。每包最多一条算术（含乘除/控制流）和一条访存；同类指令分周期分派。第一条资源充足即允许单条分派；两条均满足 ROB、物理寄存器、IQ、LSQ 与检查点需求时才分派两条。控制流或非控制流预测修正指令终止分派包。双发射每周期至多从 ALU IQ 和 MEM IQ 各取一条，不支持两条普通 ALU 同周期发射，也不复制执行单元。单宽通过 generate 保留原来的直接 rename、ROB metadata 和两读口 PRF 路径。
+双分派由 `rename_dual` 的 `2*DECODE_WIDTH` 项译码缓冲形成有序前缀，顶层连接 `DECODE_WIDTH=DISPATCH_WIDTH=2`，不等待凑满两条。包可以包含一条算术加一条访存，或两条算术；最多一条访存，最多一条控制流或乘除法。两条算术中，控制流/乘除法进入主 IQ，另一条普通整数进入辅助 IQ；均为普通整数时 lane 0 进入主 IQ。第一条资源充足即允许单条分派；两条资源均足时才分派两条。控制流或非控制流预测修正终止分派包。双发射时主算术候选独立进入第一组读口，辅助整数与访存候选在第二组读口按 ROB 年龄仲裁，每周期最多两条。单发射时三队列共享一组读口，总捕获数不超过一条。单分派通过 generate 保留直接 rename 与单条 ROB metadata，并去掉辅助执行通路。
 
-下列实现选择固定为当前路径：SRAM 检查点、顺序关系 IQ 选择、SRAM PRF、寄存 ALU 结果、独立分支解析、直接写回、LSU 注册地址调度与响应完成旁路、已提交 Store 缓冲、D-cache miss 下命中及部分 refill 命中、三槽预取和定向失效、全局历史预测。双宽扩展集中在 rename、ROB 分配、issue 和 PRF 读口，IQ/LSQ 各自仍只有一个分配入口。
+下列实现选择固定为当前路径：SRAM 检查点、顺序关系 IQ 选择、SRAM PRF、寄存 ALU 结果、独立分支解析、直接写回、LSU 注册地址调度与响应完成旁路、已提交 Store 缓冲、D-cache miss 下命中及部分 refill 命中、三槽预取和定向失效、全局历史预测。各 IQ 与 LSQ 各自仍只有一个分配入口；双算术通过两个独立 IQ 与 ALU 实例执行。
 
-`iq_core.MEM_QUEUE` 区分 ALU 队列与访存队列的 Store 就绪规则；`UOP_BITS` 和字段偏移用于这两种 payload 的适配。`rename.WAKE_WIDTH` 表示完成唤醒数，顶层固定接三源；它与 `WB_WIDTH` 不同。`dcache.BULK_REFILL` 由顶层 `DATA_PREFETCH` 连接。`axi_bridge` 直接使用 `LD_ID_WIDTH` / `IF_ID_WIDTH` 表示事务 ID 位数，不再借用队列深度表示它们；写队列容量在顶层固定为 16。
+`iq_core.MEM_QUEUE` 区分 ALU 队列与访存队列的 Store 就绪规则；`UOP_BITS` 和字段偏移用于这两种 payload 的适配。`rename.WAKE_WIDTH` 表示完成唤醒数，顶层接主 ALU、MUL、LSU、辅助 ALU 四源，与 `WB_WIDTH` 不同。IQ 另接两个 ALU 的 early wake。`issue.FORWARD_WIDTH` 和 `lsu.FORWARD_WIDTH` 顶层均接 4，模块独立使用时默认 3。`dcache.BULK_REFILL` 由顶层 `DATA_PREFETCH` 连接。`axi_bridge` 使用 `LD_ID_WIDTH` / `IF_ID_WIDTH` 表示事务 ID 位数；写队列容量在顶层固定为 16。
 
 ## 3. 主数据流与时序
 
@@ -72,15 +72,20 @@ flowchart LR
     F --> D[组合 decode]
     D --> RN[rename / checkpoint]
     RN --> AQ[iq_alu]
+    RN --> A2Q[辅助 iq_alu]
     RN --> MQ[iq_mem]
     RN --> ROB[rob]
     AQ --> IS[issue / RR 捕获]
     MQ --> IS
+    A2Q --> I2[辅助 issue]
     PRF[prf] --> IS
+    PRF --> I2
     IS --> ALU[alu]
+    I2 --> A2[辅助 alu]
     IS --> MUL[mul_div]
     IS --> LSU[lsu / LQ / SQ]
     ALU --> WB[wb_arb]
+    A2 --> WB
     MUL --> WB
     LSU --> WB
     WB --> PRF
@@ -97,7 +102,7 @@ flowchart LR
     IC --> AXI
 ```
 
-取指队列的 PC、预测 NPC、taken 与 instruction 存入 SRAM；空输出队列可以旁路输出。decode 是组合逻辑。单分派时直接进入原 rename；双分派时先进入两项缓冲，允许消费前缀和接收新指令同周期发生，后端恢复或前端修正清空该缓冲。rename 在 dispatch 边沿原子更新 RAT、ROB、LSQ 和检查点。IQ 普通完成唤醒与 ALU early wake 都可参与同周期候选选择，并在边沿更新源 ready。没有就绪驻留项时，新分派且操作数就绪的指令可以旁路 IQ 直接进入 issue；被当周期选走的新指令不占用 IQ 有效项。单发射在两个队列的可接收候选之间按 ROB 年龄选一条；双发射可同时捕获两个队列的候选，各自的执行槽回压独立处理。ALU、MUL、MEM 三个保持槽分别服务执行单元。
+取指队列的 PC、预测 NPC、taken 与 instruction 存入按槽号交错的 SRAM bank，响应可旁路到输出，回压时保存输出包及 count。decode 是并行组合逻辑。单分派时直接进入 rename；双分派时先进入四项缓冲，允许消费前缀和接收新包同周期发生，后端恢复或前端修正清空该缓冲。rename 在 dispatch 边沿原子更新 RAT、ROB、LSQ 和检查点。IQ 普通完成唤醒与两个 ALU 的 early wake 都可参与同周期候选选择，并在边沿更新源 ready。没有就绪驻留项时，新分派且操作数就绪的指令可以旁路 IQ 直接进入 issue；被当周期选走的新指令不占用 IQ 有效项。主 issue 保持 ALU、MUL、MEM 三个槽，辅助 issue 保持一个整数槽；每个槽独立接受执行回压，所有捕获共享顶层发射宽度限制。
 
 ALU 结果寄存后参与完成仲裁，乘除法和访存具有各自的多周期状态。写回直接送到 PRF 和 ROB；ROB 依据已完成位从 head 提交连续前缀。普通指令的本周期写回在边沿更新完成位，下一周期可提交；head Store 授权额外检查本周期完成通道。
 
@@ -120,8 +125,8 @@ ALU 结果寄存后参与完成仲裁，乘除法和访存具有各自的多周�
 
 | 通道 / payload | 字段：高位 → 低位 | 位数公式 | 默认 |
 | --- | --- | --- | ---: |
-| fetch packet | `pc[32], inst[32], pred_npc[32]` | 96 | 96 |
-| decode uop | `pc[32], pred_npc[32], op[6], rs1[5], rs2[5], rd[5], imm[32]` | 117 | 117 |
+| fetch packet（每路） | `pc[32], inst[32], pred_npc[32]` | 96 | 96 |
+| decode uop（每路） | `pc[32], pred_npc[32], op[6], rs1[5], rs2[5], rd[5], imm[32]` | 117 | 117 |
 | ROB alloc | `old_pdst[PW], kind[2], sq_id[SIDW]` | `PW+2+SIDW` | 11 |
 | ALU IQ | `rob[RW], cp[CIDW], op[6], pdst[PW], psrc1[PW], psrc2[PW], pc[32], imm[32]` | `RW+CIDW+6+3*PW+64` | 95 |
 | MEM IQ | `rob[RW], mem_op[3], mem_id[MIDW], psrc1[PW], psrc2[PW], imm[32]` | `RW+3+MIDW+2*PW+32` | 55 |
@@ -135,14 +140,15 @@ ALU 结果寄存后参与完成仲裁，乘除法和访存具有各自的多周�
 | predictor train | `pc[32], conditional[1], taken[1], target[32]` | 66 | 66 |
 | fetch redirect | `pc[32], generation[G]` | `32+G` | 48 |
 | register commit | `old_pdst[PW]` | `PW` | 6 |
-| fetch ↔ I-cache | `generation[G], fetch_id[FIDW], count[1], addr/inst[32]` | `G+FIDW+1+32` | 53 |
+| fetch → I-cache | `generation[G], fetch_id[FIDW], count[DCW], addr[32]` | `G+FIDW+DCW+32` | 54 |
+| I-cache → fetch | `generation[G], fetch_id[FIDW], count[DCW], inst[32*DISPATCH_WIDTH]` | `G+FIDW+DCW+32*DISPATCH_WIDTH` | 86 |
 | I-cache ↔ AXI bridge | `generation[G], word_id[IFID], addr/data[32]` | `G+IFID+32` | 52 |
 | LSU ↔ D-cache load | `generation[G], lq_id[LIDW], addr/data[32]` | `G+LIDW+32` | 51 |
 | D-cache ↔ memory load | `generation[G], word_id[DCID], addr/data[32]` | `G+DCID+32` | 52 |
 | prefetch ↔ AXI bridge load | `generation[G], slot[2], word_id[DCID], addr/data[32]` | `G+2+DCID+32` | 54 |
 | Store / writeback | `addr[32], data[32], strb[4]` | 68 | 68 |
 
-双分派时仅 `disp_rob` 扩展为 `DISPATCH_WIDTH*ROB_ALLOC_BITS` 位，第 0 路为最老指令，ROB tag 为 `rob_tail+lane` 的环形下标。`disp_alu`、`disp_mem`、`disp_lsq` 和 `cp_alloc_payload` 仍为单条 payload，分别承载包内唯一的算术、访存和末尾分支。顶层 `disp_src1_ready/disp_src2_ready` 为两位，bit 0 对应 ALU IQ，bit 1 对应 MEM IQ；单分派时复制同一组 ready。`alu_disp_prepare/mem_disp_prepare` 表示包内对应类别，`alu_disp_valid/mem_disp_valid` 只在 `disp_fire` 时有效。
+`fetch_packet` 和 `decode_uop` 总位宽分别为 `96*DISPATCH_WIDTH` 和 `117*DISPATCH_WIDTH`，lane 0 在低位。双分派时 `disp_rob` 为 `DISPATCH_WIDTH*ROB_ALLOC_BITS` 位，第 0 路为最老指令，ROB tag 为 `rob_tail+lane` 的环形下标。`disp_alu`、`disp_alu2`、`disp_mem`、`disp_lsq` 和 `cp_alloc_payload` 各自为单条 payload，承载主算术、辅助整数、访存和末尾分支。`alu2_dispatch` 表示双算术包，辅助 IQ 仅在 `disp_fire && alu2_dispatch` 分配。顶层 `disp_src1_ready/disp_src2_ready` bit 0 对应主 ALU IQ，bit 1 对应 MEM IQ；辅助 ready 由 `alu2_src1_ready/alu2_src2_ready` 提供。单分派时复制原 ready。`alu_disp_prepare/mem_disp_prepare` 表示主算术/访存类别，`alu_disp_valid/mem_disp_valid` 仅在 `disp_fire` 有效。
 
 `rd_addr` 为 `2*ISSUE_WIDTH*PW` 位，`rd_data` 为 `64*ISSUE_WIDTH` 位。单发射的两个读口服务所选候选；双发射的读口 0/1 固定服务算术候选的 rs1/rs2，读口 2/3 固定服务访存候选的 rs1/rs2。`prf.READ_PORTS=2*ISSUE_WIDTH`，读口增加不会复制物理存储或增加写回源。
 
@@ -168,19 +174,19 @@ rename 在 reset 时建立 32 个 architectural register 的初始物理映射�
 
 每个控制流检查点保存包含该指令目的更新后的 RAT，以及后续物理分配集合。RAT 检查点分 bank 存入 SRAM；单分派的空闲 bank 可在控制流分派握手前预写，双分派在真实 `cp_alloc_valid` 时写入整个包更新后的 RAT。实际有效分配与最近一次有效写入 ID 由 `cp_alloc_valid` 更新。读数据提前准备，最近一次有效写入的检查点通过旁路恢复。因此 squash 边沿可以直接恢复 RAT，并回收更年轻的物理分配，不增加恢复等待状态。释放 mask 同时维护 rename 与 branch_ctrl 的检查点有效状态。
 
-`iq_alu` 与 `iq_mem` 共用 `iq_core` 的 entry、源就绪、年龄关系和选择实现。普通候选要求两个实际使用的源 ready。Store 可以在 base ready 后先生成地址，data readiness 独立携带，由 issue/LSU 后续补齐；Load 按其源要求选择。单分派的空槽选择用 free bitmap 的前缀 OR 生成 first-free one-hot，无精确 free rank。驻留的最老就绪候选优先于新分派旁路。新指令的 payload 可提前准备，只有真实分派且源 ready 时才产生有效旁路候选；`cand_take` 消费旁路时抑制 IQ 分配有效位。两个队列各提供一个候选，issue 在可接收的候选之间按 ROB 年龄选一条。
+`iq_alu` 与 `iq_mem` 共用 `iq_core` 的 entry、源就绪、年龄关系和选择实现。普通候选要求两个实际使用的源 ready。Store 可以在 base ready 后先生成地址，data readiness 独立携带，由 issue/LSU 后续补齐；Load 按其源要求选择。空槽选择用 free bitmap 的前缀 OR 生成 first-free one-hot。驻留的最老就绪候选优先于新分派旁路。新指令的 payload 可提前准备，只有真实分派且源 ready 时才产生有效旁路候选；`cand_take` 消费旁路时抑制 IQ 分配有效位。主/辅助算术和访存队列各提供一个候选，顶层限制同周期捕获总数并仲裁共享读口。
 
-PRF 有 `2*ISSUE_WIDTH` 个读口和 `WB_WIDTH` 个写口，存储值使用 SRAM，当前写口按 8-word bank 与 word 两级译码；多个写口指向同一项时较高路号优先，physical 0 不写入。先选择 SRAM 读出字，再按读口匹配上一周期写回并旁路；同一读口匹配多个写口时较高路号优先。issue 另保留当前/上一周期完成转发；每个保持槽独立捕获对应读口数据，操作数即使执行单元回压也会在槽中更新。完成源顺序固定为 ALU=0、MUL=1、LSU=2，与物理写回路数无关。
+PRF 有 `2*ISSUE_WIDTH` 个读口和 `WB_WIDTH` 个写口，存储值使用 SRAM，当前写口按 8-word bank 与 word 两级译码；多个写口指向同一项时较高路号优先，physical 0 不写入。先选择 SRAM 读出字，再按读口匹配上一周期写回并旁路；同一读口匹配多个写口时较高路号优先。issue 另保留当前/上一周期完成转发；每个保持槽独立捕获对应读口数据，操作数即使执行单元回压也会在槽中更新。完成源顺序固定为主 ALU=0、MUL=1、LSU=2、辅助 ALU=3，与物理写回路数无关。
 
-rename 接三源完成唤醒；IQ 接三源完成唤醒加一源 ALU 提前唤醒。IQ 约定 `wake` 最后一路为 ALU early wake，其他路为普通完成；全部路进入当前候选组合选择，并参与驻留项和新分派项的 ready 更新。ALU 的提前唤醒领先寄存结果一个周期，后续实际值由当前 ALU 结果转发。MUL/LSU 普通完成唤醒后，使用者在下一周期进入执行槽，使用上一周期完成值；它们的当前结果仅进入 Store data 的同周期转发。保持槽持续保存已转发操作数，回压时不丢值。
+rename 接四源完成唤醒；IQ 的低四路为普通完成，高两路为主/辅助 ALU early wake，全部路进入当前候选组合选择，并参与驻留项和新分派项的 ready 更新。两个 ALU 的提前唤醒领先寄存结果一个周期，后续实际值由对应 ALU 当前结果转发。MUL/LSU 普通完成唤醒后，使用者在下一周期进入执行槽，使用上一周期完成值；它们的当前结果仅进入 Store data 的同周期转发。保持槽持续保存已转发操作数，回压时不丢值。
 
 乘法采用 unsigned 32×4 的 radix-16 迭代：接收时将乘数放入组合 accumulator 的低 32 位，每个 MUL_ADD 边沿加一个 nibble 的部分积后右移四位，共八步。随后一拍根据符号修正高 32 位，输出 MUL/MULH/MULHSU/MULHU 结果。符号修正保存两个符号条件，操作数复用 multiplicand 与 divisor 寄存器，乘除法在单元内互斥。除法继续逐位 restoring division，保留除零与有符号溢出的结果约定。乘除法结果由同一保持状态等待写回消费。
 
-`wb_arb` 每周期接受最多 `WB_WIDTH` 个三源结果。宽度不小于 2 时第 0 路优先接受 ALU，其余按轮转选择；宽度 1 时三源轮转。每个源最多被选一次。被 squash 的年轻结果仍可被消费，但不置 `done_valid` / `write_valid`。非零 pdst 才写 PRF；pdst=0 的有效完成仍更新 ROB。仲裁后的完成通道和写口数都不超过配置值。
+`wb_arb.EXTRA_ALU` 默认为 0，顶层设为 1，在原主 ALU、MUL、LSU 之外增加辅助 ALU 结果源。每周期接受最多 `WB_WIDTH` 个结果。宽度不小于 2 时第 0 路优先接受主 ALU，其余源轮转；宽度 1 时所有源轮转。每个源最多被选一次。被 squash 的年轻结果仍可被消费，但不置 `done_valid` / `write_valid`。非零 pdst 才写 PRF；pdst=0 的有效完成仍更新 ROB。仲裁后的完成通道和写口数均不超过配置值。
 
 ## 6. 控制流、ROB 与 Store 提交
 
-预测器采用 BTB、2 位 BHT 和固定 8 位全局历史，BTB 的值存储使用 SRAM。最近一次 BTB 写入仅在选中 lookup index 后统一旁路；同 index 但 PC tag 不同的最近更新必须屏蔽旧 hit。`BP_ENABLE=0` 时输出顺序 next-PC。fetch 把预测 next-PC 放进 packet；rename 对非控制流却预测成跳转的情况发出前端修正，不触发后端 squash。
+预测器采用 BTB、2 位 BHT 和固定 8 位全局历史，BTB 的值存储使用 SRAM。`LOOKUP_WIDTH=DISPATCH_WIDTH`，输入 `lookup_pc[32]` 是包首 PC，lane n 查询 `lookup_pc+4*n`；输出 `pred_taken[LOOKUP_WIDTH]` 和 `pred_npc[32*LOOKUP_WIDTH]`。各路共享一次分支训练及历史更新。最近一次 BTB 写入仅在选中 lookup index 后统一旁路；同 index 但 PC tag 不同的最近更新必须屏蔽旧 hit。`BP_ENABLE=0` 时输出顺序 next-PC。fetch 在首个 taken 预测截断取指包，把逐条 next-PC 放进 packet；rename 对非控制流误预测发出前端修正，不触发后端 squash。
 
 `branch_ctrl` 仅接受 cp 有效、cp ID 在范围内且 cp ROB tag 匹配的 resolve。比较真实 npc 与保存的 pred_npc，错误时恢复该检查点、释放该检查点及更年轻检查点、保留触发分支和更老指令。正确解析释放自身检查点。分支解析与结果写回路径独立。匹配解析才训练预测器，失效检查点的旧结果不能训练或重定向。后端 mispredict 重定向优先于前端修正；每次重定向将 generation 加 1。
 
@@ -194,7 +200,7 @@ Store 地址和数据准备完后先报告 FU 完成；只有已完成且位于 
 
 LSU 提前读取已提交 Store FIFO 的当前队头和下一项，缓存的当前写完成仅控制最后一级数据选择，使下一条 Store 可以立即发出。LSU 完成选择与写回仲裁的 one-hot 数据选择按 16-bit 分组分发，仲裁顺序和有效握手保持原协议。D-cache 的 valid/dirty 读取采用低位 one-hot 分组和高位组选择，普通请求与 miss 期间命中探测各有独立读取路径。
 
-顶层将完成 valid/pdst 分发至 rename、两个 IQ、issue 和 LSU，完成值保持原路序。D-cache 返回 packet 的 hit-under-miss 选择按 16-bit 分组分发；metadata 地址读取与 valid/dirty 更新译码通过缓冲隔离。
+顶层将完成 valid/pdst 分发至 rename、三个 IQ、两个 issue 和 LSU，完成源顺序为主 ALU、MUL、LSU、辅助 ALU。D-cache 返回 packet 的 hit-under-miss 选择按 16-bit 分组分发；metadata 地址读取与 valid/dirty 更新译码通过缓冲隔离。
 
 ALU 的真实 next-PC 选择和乘除单元宽寄存器写使能按 16-bit 分组分发。乘除单元的状态、计数器和恢复优先级保持原流程，数据分组不增加流水级或运算周期。
 
@@ -210,13 +216,13 @@ I-cache 响应预览保持已捕获的 request generation，不由同周期 redi
 
 I-cache 首次 miss 的地址、set/way、generation、计数与有效状态通过八组 `fill_capture` 缓冲分别捕获；使能仍是 `request_fire && !hit_found && !fill_busy`，不增加寄存级或改变请求/响应周期。分组限制分支恢复控制到取指请求寄存器的扇出。
 
-fetch 输出队列的 `output_count==0` 通过七组 `packet_bypass` 分发到六个 16-bit packet 选择块和 count 选择块；空队列旁路、非空队列出队及重定向逻辑保持原时序。
+fetch 正常从队头的连续 ready 前缀输出，匹配响应可旁路 instruction SRAM。首次输出回压时保存整包及 count，直到握手或重定向，避免等待期间返回新指令改变已提供的包。
 
-fetch 的 `!reset && !fetch_redirect_valid` 通过四组 `frontend_run` 分别驱动 create、输出缓冲装载、I-cache 请求和 fetch 有效信号。LSU 的 `disp_valid && !squash_valid` 通过五组 `dispatch_capture` 分别驱动 Store 标志/ROB tag、Load 标志/ROB tag/pdst 捕获；分组均为组合缓冲，不改变分配事件或流水周期。
+fetch 的 `!reset && !fetch_redirect_valid` 控制请求、分配与有效输出。LSU 的 `disp_valid && !squash_valid` 通过五组 `dispatch_capture` 分别驱动 Store 标志/ROB tag、Load 标志/ROB tag/pdst 捕获；分组为组合缓冲，不改变分配事件或流水周期。
 
-fetch 的同步清空通过 `FETCH_QUEUE_DEPTH+1` 组 `frontend_clear` 分别服务各取指槽和公共状态。未被 I-cache 接受的首次请求通过七组 `offer_capture` 保存 count/taken、PC、next-PC 和预测 NPC，其中三个地址均按 16-bit 捕获；offer_valid 仍在原边沿置位，已保持请求的内容和身份保持原握手约定。
+fetch 在 reset 或重定向边沿清空槽状态、指针、计数和输出保持有效位。未被 I-cache 接受的首次请求保存在 offer 寄存器中，包括 count、PC、下一 PC 和逐路预测 metadata；直至接受，地址、generation、队列 ID 和 metadata 均保持不变。
 
-取指队列 metadata SRAM 保存 `{pc[32], pred_npc[32], taken[1]}`，instruction SRAM 保存 32 位指令；有效状态留在寄存器中。所有存活项属于当前 fetch generation，重定向同时清空项状态和输出队列，因此不逐项保存 generation。metadata 仅预写当前空闲 tail；真实 `create_fire` 才占用它。I-cache 接收 fetch queue ID，miss 时按行内字编号 refill，命中经 SRAM 返回。标签按 way 放入 payload SRAM，选中 set 后比较一次 tag，最近写入旁路覆盖 SRAM 写周期的无效读输出。取指重定向不会撤销已经启动的物理 refill，fetch 按 generation 忽略旧逻辑响应。D-cache 为 write-back/write-allocate：脏替换先写回再 refill；支持 refill 期间其他已缓存行的 Load 命中，以及当前行已返回字的 Load 命中，冲突请求内部保持/重试。Store 命中可连续流水，mask 只修改相应字节。
+取指队列 metadata SRAM 保存 `{pc[32], pred_npc[32], taken[1]}`，instruction SRAM 保存 32 位指令；按 `slot % FETCH_WIDTH` 分 bank，连续两项和回绕分别落入不同写口，每个读口按队头槽号选择 bank。有效状态留在寄存器中，所有存活项属于当前 generation，metadata 仅在 `create_fire` 写入并占用对应槽。I-cache 请求携带首槽 ID 与 count，响应携带连续的 count 条指令，lane 0 位于低位；请求不会跨行，miss 仍按单字编号 refill，命中一次 SRAM 读取后选出一条或两条。标签按 way 放入 payload SRAM，最近写入旁路覆盖写周期无效读输出。取指重定向不撤销物理 refill，fetch 按 generation 忽略旧逻辑响应。D-cache 为 write-back/write-allocate：脏替换先写回再 refill；支持 refill 期间其他已缓存行及当前行已返回字的 Load 命中，冲突请求保持/重试。Store 命中可连续流水，mask 只修改相应字节。
 
 数据预取使用三个下一行槽，只在没有外部 demand 请求时发预取；缓存行数据保存在 SRAM。完整预取行可通过整行接口 refill，部分行可按字提供。D-cache 向桥发送的写请求握手时，`write_fire/write_addr` 按地址定向失效相同预取行，覆盖脏行写回和 I/O 写；已经发出的旧预取须排空，不能让旧数据重新变为命中。`DATA_PREFETCH=0` 时顶层直接连接 D-cache 与桥，关闭整行预取接口。
 
@@ -302,7 +308,7 @@ make branch-accuracy APPIMAGE= BP_WB_WIDTH=1 BP_COMMIT_WIDTH=2 BP_ENABLE=0
 ```powershell
 .\toolchain\oss-cad-suite\lib\python3.exe toolchain/windows.py test --parameter DISPATCH_WIDTH=2 --parameter ISSUE_WIDTH=2 --out build/dual --jobs 8
 .\toolchain\oss-cad-suite\lib\python3.exe scripts/dev/test_multi_issue.py
-.\toolchain\oss-cad-suite\lib\python3.exe toolchain/windows.py synth --out build/single-synth --clock-period 3.3333333333333335
+.\toolchain\oss-cad-suite\lib\python3.exe toolchain/windows.py synth --out build/dual-synth --clock-period 2 --abc-driving-cell INVx1_ASAP7_75t_R --abc-load-ff 5.0
 ```
 
 第二条命令用 Verilator `1800-2005` 运行独立模块激励，输出在 `build/multi-unit`；它不改变官方程序集或 CPU 外部接口。综合默认使用顶层参数默认值；配置其他参数的实例时，须将同一组覆盖用于 Yosys elaboration 和仿真。
@@ -311,6 +317,6 @@ make branch-accuracy APPIMAGE= BP_WB_WIDTH=1 BP_COMMIT_WIDTH=2 BP_ENABLE=0
 
 正确性/性能使用官方 `prepare_case/compare_output` 及 cycles 协议，每次运行写入逐程序 stdout/stderr 和 `results/correctness.json` 或 `results/perf.json`。显式 `--reuse-results` 根据仿真器、程序/答案/指标、上限、延迟和超时复用成功结果，JSON 的 `reused` 与控制台复用数量描述其来源；`--result-cache` 指定结果缓存目录。任一性能用例失败时不输出部分 GEOMEAN，退出码非零。
 
-综合目录内 `.flow-synth.json` 保存成功面积与时序产物的输入/输出散列，`.flow-elaborate.json` 和 `.flow-synth-stage.json` 分别描述 Yosys elaboration 与映射阶段。源码、库、工具、脚本、已有 `abc.constr`、模式、时钟端口和周期参与缓存选择；变更目标周期复用 elaboration 后重新映射和分析时序。仍调用官方 `synth.py/fakeram.py/timing.py` 生成面积与 OpenSTA 报告。
+综合目录内 `.flow-synth.json` 保存成功面积与时序产物的输入/输出散列，`.flow-elaborate.json` 和 `.flow-synth-stage.json` 分别描述 Yosys elaboration 与映射阶段。源码、库、工具、脚本、模式、时钟端口、周期及 ABC 驱动单元/负载参数参与缓存选择；变更周期或 ABC 参数可复用 elaboration，重新映射和分析时序。官方脚本在输出目录生成 `abc.constr`，映射缓存将其作为输入，完整缓存将其作为产物校验。开发 synth、两个 report 入口和 Make 的 `synth/fast-synth/report` 传递相同的 ABC 参数，默认 `INVx1_ASAP7_75t_R`、5.0 fF。仍调用官方 `synth.py/fakeram.py/timing.py` 生成面积与 OpenSTA 报告。
 
 Windows 完整报告的 `--cache-dir` 默认 `build/windows-report-cache`，普通仿真器、监视仿真器与综合分别使用独立子目录；时间戳 `.build` 保存本次日志和产物快照。`--targets` 选择报告阶段，默认仍为 correctness → perf → IPC → synth；`--reuse-results` 控制测试结果复用，`--force` 重新构建/综合。报告记录阶段耗时和复用数量，单项失败仍继续后续阶段并最终返回非零。

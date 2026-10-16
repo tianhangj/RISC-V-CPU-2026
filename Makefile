@@ -111,7 +111,8 @@ ipc-profile:
 		$(foreach value,$(PARAMETERS),--parameter "$(value)") $(if $(Case),--case "$(Case)",)
 
 report:
-	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/report.py" --image "$(IMAGE)" --output-dir "$(REPORT_OUT)" --jobs $(JOBS)
+	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/report.py" --image "$(IMAGE)" --output-dir "$(REPORT_OUT)" --jobs $(JOBS) \
+		--clock-period "$(CLOCK_PERIOD_NS)" --abc-driving-cell "$(ABC_DRIVING_CELL)" --abc-load-ff "$(ABC_LOAD_FF)"
 
 perf:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/testcase.py" --kind perf --build "$(BUILD)" \
@@ -138,6 +139,7 @@ fast-build fast-test fast-perf:
 fast-synth:
 	"$(PYTHON)" "$(FRAMEWORK_DIR)/scripts/dev/fast.py" synth --filelist "$(FILELIST)" --out "$(SYNTH_OUT)" \
 		--mode "$(MODE)" --clock-period "$(CLOCK_PERIOD_NS)" --appimage "$(APPIMAGE)" \
+		--abc-driving-cell "$(ABC_DRIVING_CELL)" --abc-load-ff "$(ABC_LOAD_FF)" \
 		$(if $(YOSYS),--yosys "$(YOSYS)",) $(if $(ABC),--abc "$(ABC)",) \
 		$(if $(STA),--sta "$(STA)",) $(if $(ASAP7_LIB),--asap7-lib "$(ASAP7_LIB)",) \
 		$(if $(filter 1,$(FORCE)),--force,)

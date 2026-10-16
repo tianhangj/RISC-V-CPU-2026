@@ -3,6 +3,7 @@
 // remain with the operands so the result can be forwarded at execution.
 module issue #(
     parameter integer ISSUE_WIDTH = 1,
+    parameter integer FORWARD_WIDTH = 3,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 48,
     parameter integer LQ_DEPTH = 4,
@@ -15,11 +16,12 @@ module issue #(
     input wire [ALU_IQ_BITS-1:0] alu_cand_uop,
     input wire [MEM_IQ_BITS-1:0] mem_cand_uop,
     output wire alu_cand_take, mem_cand_take,
+    output wire alu_slot_ready, mem_slot_ready,
     output wire [2*ISSUE_WIDTH*PW-1:0] rd_addr,
     input wire [64*ISSUE_WIDTH-1:0] rd_data,
-    input wire [2:0] forward_valid,
-    input wire [3*PW-1:0] forward_pdst,
-    input wire [3*32-1:0] forward_value,
+    input wire [FORWARD_WIDTH-1:0] forward_valid,
+    input wire [FORWARD_WIDTH*PW-1:0] forward_pdst,
+    input wire [FORWARD_WIDTH*32-1:0] forward_value,
     output wire mem_store_data_valid,
     output wire [PW-1:0] mem_store_psrc,
     output wire branch_exec_valid,
@@ -46,9 +48,9 @@ module issue #(
     localparam integer MEM_EXEC_BITS = RW+3+MIDW+96;
     (* keep *) reg [2:0] busy;
     (* keep *) reg branch_announced;
-    reg [2:0] last_valid;
-    reg [3*PW-1:0] last_pdst;
-    reg [3*32-1:0] last_value;
+    reg [FORWARD_WIDTH-1:0] last_valid;
+    reg [FORWARD_WIDTH*PW-1:0] last_pdst;
+    reg [FORWARD_WIDTH*32-1:0] last_value;
     always @(posedge clock) begin
         if (reset) last_valid<=0;
         else last_valid<=forward_valid;
@@ -72,6 +74,8 @@ module issue #(
     endfunction
     wire alu_offer=alu_cand_valid &&
         (is_mul?(!busy[1] || mul_exec_ready):(!busy[0] || alu_exec_ready));
+    assign alu_slot_ready=!busy[0] || alu_exec_ready;
+    assign mem_slot_ready=!busy[2] || mem_exec_ready;
     wire mem_offer=mem_cand_valid && (!busy[2] || mem_exec_ready);
     // Compare ring positions directly: wrapping below head reverses the
     // numeric relation only when the two candidates straddle head.
@@ -107,11 +111,11 @@ module issue #(
     // Bound each completion-match net to a few operand chunks. Branch and
     // arithmetic forwarding retain separate buffers even when their match
     // predicates are identical.
-    wire [3*3*4-1:0] current1_select, current2_select;
-    wire [3*3*4-1:0] previous1_select, previous2_select;
+    wire [3*FORWARD_WIDTH*4-1:0] current1_select, current2_select;
+    wire [3*FORWARD_WIDTH*4-1:0] previous1_select, previous2_select;
     for (genvar lane=0; lane<3; lane=lane+1) begin : g_forward_lane
-        for (genvar w=0; w<3; w=w+1) begin : g_completion
-            localparam integer BASE=(lane*3+w)*4;
+        for (genvar w=0; w<FORWARD_WIDTH; w=w+1) begin : g_completion
+            localparam integer BASE=(lane*FORWARD_WIDTH+w)*4;
             wire current1=forward_valid[w] && src1[lane]!=0 && src1[lane]==forward_pdst[w*PW +: PW];
             wire current2=forward_valid[w] && src2[lane]!=0 && src2[lane]==forward_pdst[w*PW +: PW];
             wire previous1=last_valid[w] && src1[lane]!=0 && src1[lane]==last_pdst[w*PW +: PW];
@@ -124,38 +128,38 @@ module issue #(
     end
     always @* begin
         branch_operand1=operand1[0]; branch_operand2=operand2[0];
-        for (integer w=0; w<3; w=w+1)
+        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
             for (integer half=0; half<2; half=half+1) begin
                 if (previous1_select[w*4+2+half]) branch_operand1[half*16 +: 16]=last_value[w*32+half*16 +: 16];
                 if (previous2_select[w*4+2+half]) branch_operand2[half*16 +: 16]=last_value[w*32+half*16 +: 16];
             end
-        for (integer w=0; w<3; w=w+1)
+        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
             for (integer half=0; half<2; half=half+1)
-                if (w==0) begin
+                if ((w==0 || w==3)) begin
                     if (current1_select[w*4+2+half]) branch_operand1[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                     if (current2_select[w*4+2+half]) branch_operand2[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                 end
         mem_data_forward=0;
-        for (integer w=0; w<3; w=w+1)
+        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 if (last_valid[w] && src2[2]==last_pdst[w*PW +: PW]) mem_data_forward=1;
-        for (integer w=0; w<3; w=w+1)
+        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
             if (forward_valid[w] && src2[2]==forward_pdst[w*PW +: PW]) mem_data_forward=1;
         for (integer lane=0; lane<3; lane=lane+1) begin
             forwarded1[lane]=operand1[lane]; forwarded2[lane]=operand2[lane];
-            for (integer w=0; w<3; w=w+1)
+            for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 for (integer half=0; half<2; half=half+1) begin
-                    if (previous1_select[(lane*3+w)*4+half])
+                    if (previous1_select[(lane*FORWARD_WIDTH+w)*4+half])
                         forwarded1[lane][half*16 +: 16]=last_value[w*32+half*16 +: 16];
-                    if (previous2_select[(lane*3+w)*4+half])
+                    if (previous2_select[(lane*FORWARD_WIDTH+w)*4+half])
                         forwarded2[lane][half*16 +: 16]=last_value[w*32+half*16 +: 16];
                 end
-            for (integer w=0; w<3; w=w+1)
+            for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 for (integer half=0; half<2; half=half+1) begin
-                    if (w==0 &&
-                        current1_select[(lane*3+w)*4+half])
+                    if ((w==0 || w==3) &&
+                        current1_select[(lane*FORWARD_WIDTH+w)*4+half])
                         forwarded1[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
-                    if ((lane==2 || w==0) &&
-                        current2_select[(lane*3+w)*4+half])
+                    if ((lane==2 || (w==0 || w==3)) &&
+                        current2_select[(lane*FORWARD_WIDTH+w)*4+half])
                         forwarded2[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                 end
         end

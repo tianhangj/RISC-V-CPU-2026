@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -108,6 +109,8 @@ def synthesize(arguments, extra_inputs=()):
     parser.add_argument("--mode", choices=("opt", "diagnose"), default="opt")
     parser.add_argument("--clock-period", type=float, default=2.0)
     parser.add_argument("--clock-port", default="clock")
+    parser.add_argument("--abc-driving-cell", default="INVx1_ASAP7_75t_R")
+    parser.add_argument("--abc-load-ff", type=float, default=5.0)
     parser.add_argument("--appimage", default=str(DEFAULT_APPIMAGE))
     parser.add_argument("--yosys")
     parser.add_argument("--abc")
@@ -118,6 +121,10 @@ def synthesize(arguments, extra_inputs=()):
     import math
     if not math.isfinite(args.clock_period) or args.clock_period <= 0:
         parser.error("clock period must be finite and positive")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.abc_driving_cell):
+        parser.error("ABC driving cell must contain only letters, digits or underscores")
+    if not math.isfinite(args.abc_load_ff) or args.abc_load_ff < 0:
+        parser.error("ABC output load must be finite and nonnegative")
     legacy = args.filelist.resolve().parent / "blackboxes.txt"
     if legacy.is_file() and any(line.split("#", 1)[0].strip() for line in legacy.read_text().splitlines()):
         parser.error("zero-area blackbox exclusions are not supported")
@@ -135,15 +142,12 @@ def synthesize(arguments, extra_inputs=()):
     common = [*sources, args.filelist.resolve(), SCRIPTS / "synth.py", SCRIPTS / "build.py",
               SCRIPTS / "fakeram.py", SCRIPTS / "synth_report.py", Path(__file__),
               Path(__file__).with_name("flow_cache.py"), *extra_inputs]
-    # Respect any local constraints already used by the course script.
-    constraint = ROOT / "abc.constr"
     inputs = [*common, SCRIPTS / "timing.py", SCRIPTS / "timing.tcl", *libraries, yosys, abc, sta]
-    if constraint.is_file():
-        inputs.append(constraint)
     hashes = identities(inputs)
     identity = {"schema": 1, "inputs": hashes, "mode": args.mode,
                 "period": args.clock_period, "clock_port": args.clock_port,
-                "out": out.as_posix(), "abc_constraint": constraint.is_file(),
+                "out": out.as_posix(), "abc_driving_cell": args.abc_driving_cell,
+                "abc_load_ff": args.abc_load_ff,
                 "yosys_version": synth.subprocess.check_output([yosys, "-V"], text=True).strip(),
                 "sta_version": synth.subprocess.check_output([sta, "-version"], text=True).strip()}
     record = out / ".flow-synth.json"
@@ -156,8 +160,7 @@ def synthesize(arguments, extra_inputs=()):
         if name == "synth":
             stage_inputs.extend([abc, *libraries, directory / "ram/prepared.json"])
             stage_inputs.extend(sorted(p for p in (directory / "ram").rglob("*") if p.is_file()))
-            if constraint.is_file():
-                stage_inputs.append(constraint)
+            stage_inputs.append(directory / "abc.constr")
             artifacts = [directory / n for n in ("design.json", "stat.json", "mapped.v")]
         phase = {"commands": commands, "inputs": identities(stage_inputs)}
         stage_record = directory / (".flow-synth-stage.json" if name == "synth" else f".flow-{name}.json")
@@ -183,6 +186,7 @@ def synthesize(arguments, extra_inputs=()):
         sys.argv = [str(SCRIPTS / "synth.py"), "--filelist", str(args.filelist.resolve()),
                     "--out", str(args.out.resolve()), "--mode", args.mode,
                     "--clock-period", str(args.clock_period), "--clock-port", args.clock_port,
+                    "--abc-driving-cell", args.abc_driving_cell, "--abc-load-ff", str(args.abc_load_ff),
                     "--appimage", "", "--yosys", yosys, "--abc", abc, "--sta", sta,
                     "--asap7-lib", str(libraries[0].parent)]
         start = time.perf_counter()
@@ -190,11 +194,11 @@ def synthesize(arguments, extra_inputs=()):
             synth.main()
         finally:
             synth.run_yosys, sys.argv = original_run, original_argv
-        if identities(inputs) != hashes or constraint.is_file() != identity["abc_constraint"]:
+        if identities(inputs) != hashes:
             raise ValueError("source or constraints changed during synthesis; rerun")
         artifacts = [out / n for n in ("report.json", "report.txt", "area.json", "timing.json",
                      "design.json", "stat.json", "mapped.v", "timing_values.json", "critical_paths.json",
-                     "constraints.sdc", "timing.rpt", "timing_checks.rpt", "clock_checks.rpt")]
+                     "abc.constr", "constraints.sdc", "timing.rpt", "timing_checks.rpt", "clock_checks.rpt")]
         artifacts.extend(sorted(p for p in (out / "ram").rglob("*") if p.is_file()))
         save_record(record, identity, artifacts)
         print(f"Synthesis and timing: {time.perf_counter() - start:.2f}s", flush=True)

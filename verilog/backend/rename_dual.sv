@@ -1,7 +1,8 @@
 // Two-wide dispatch with one arithmetic and one memory allocation per cycle.
-// The scalar frontend feeds a two-entry skid queue. Packets are ordered
+// The frontend feeds a skid queue. Packets are ordered
 // prefixes; a branch or frontend correction always terminates a packet.
 module rename_dual #(
+    parameter integer DECODE_WIDTH = 1,
     parameter integer WAKE_WIDTH = 3,
     parameter integer COMMIT_WIDTH = 2,
     parameter integer ROB_DEPTH = 32,
@@ -17,10 +18,12 @@ module rename_dual #(
     input wire [CIDW-1:0] cp_alloc_id,
     input wire decode_valid,
     output wire decode_ready,
-    input wire [116:0] decode_uop,
+    input wire [$clog2(DECODE_WIDTH+1)-1:0] decode_count,
+    input wire [DECODE_WIDTH*117-1:0] decode_uop,
     input wire [ROB_CW-1:0] rob_free,
     input wire [RW-1:0] rob_tail,
     input wire alu_iq_has_free, mem_iq_has_free, lq_has_free, sq_has_free,
+    input wire alu2_iq_has_free,
     input wire [LIDW-1:0] lq_alloc_id,
     input wire [SIDW-1:0] sq_alloc_id,
     output wire disp_valid,
@@ -28,6 +31,9 @@ module rename_dual #(
     output wire [1:0] disp_count,
     output wire [2*ROB_ALLOC_BITS-1:0] disp_rob,
     output wire [ALU_IQ_BITS-1:0] disp_alu,
+    output wire [ALU_IQ_BITS-1:0] disp_alu2,
+    output wire alu2_dispatch,
+    output wire alu2_src1_ready, alu2_src2_ready,
     output wire [MEM_IQ_BITS-1:0] disp_mem,
     output wire [MEM_ALLOC_BITS-1:0] disp_lsq,
     // Readiness is indexed by queue: arithmetic=0, memory=1.
@@ -54,8 +60,10 @@ module rename_dual #(
     localparam integer MEM_ALLOC_BITS = 1+MIDW+RW+PW;
     localparam integer CP_ALLOC_BITS = CIDW+RW+32;
 
-    reg [116:0] queued [0:1];
-    reg [1:0] queued_count;
+    localparam integer QUEUE_DEPTH=2*DECODE_WIDTH;
+    localparam integer QCW=$clog2(QUEUE_DEPTH+1);
+    reg [116:0] queued [0:QUEUE_DEPTH-1];
+    reg [QCW-1:0] queued_count;
     reg front_fix_pending;
     reg [PW-1:0] rat [0:31];
     reg [PRF_SIZE-1:0] free_q, ready_q;
@@ -66,6 +74,7 @@ module rename_dual #(
     wire [4:0] rs1 [0:1], rs2 [0:1], rd [0:1];
     wire [1:0] kind [0:1];
     wire [1:0] memory_op, branch_op, front_fix, fits;
+    wire [1:0] primary_only;
     reg [PW-1:0] pdst [0:1];
     wire [PW-1:0] ps1 [0:1], ps2 [0:1], old_pdst [0:1];
     wire [RW-1:0] tag [0:1];
@@ -85,6 +94,7 @@ module rename_dual #(
         assign {pc[lane],npc[lane],op[lane],rs1[lane],rs2[lane],rd[lane],imm[lane]}=queued[lane];
         assign branch_op[lane]=op[lane]>=3 && op[lane]<=10;
         assign memory_op[lane]=op[lane]>=30 && op[lane]<=37;
+        assign primary_only[lane]=branch_op[lane] || op[lane]>=38;
         assign kind[lane]=branch_op[lane]?2'd1:
             (op[lane]>=30 && op[lane]<=34)?2'd2:memory_op[lane]?2'd3:2'd0;
         assign front_fix[lane]=!branch_op[lane] && npc[lane]!=pc[lane]+32'd4;
@@ -102,41 +112,44 @@ module rename_dual #(
     assign old_pdst[1]=(rd[1]==0)?PW'(0):
         (rd[0]!=0 && rd[1]==rd[0])?pdst[0]:rat[rd[1]];
     wire pair_regs_fit=(rd[1]==0) || ((rd[0]==0)?found0:found1);
-    wire pair=queued_count==2 && !branch_op[0] && !front_fix[0] &&
-        memory_op[0]!=memory_op[1] && rob_free>=2 && fits[1] && pair_regs_fit;
+    wire two_alu=!memory_op[0] && !memory_op[1];
+    wire pair=queued_count>=2 && !branch_op[0] && !front_fix[0] &&
+        (memory_op[0]!=memory_op[1] ||
+         (two_alu && alu2_iq_has_free && !(primary_only[0] && primary_only[1]))) &&
+        rob_free>=2 && fits[1] && pair_regs_fit;
     assign disp_count=pair?2'd2:2'd1;
     assign disp_valid=!reset && !squash_valid && !front_fix_pending &&
         queued_count!=0 && rob_free!=0 && fits[0] && (rd[0]==0 || found0);
     wire fire=disp_valid && disp_ready;
+    wire [QCW-1:0] remaining=queued_count-(fire?QCW'(disp_count):QCW'(0));
     assign decode_ready=!reset && !squash_valid && !front_fix_pending &&
-        (queued_count<2 || fire);
+        int'(remaining)+int'(decode_count)<=QUEUE_DEPTH;
     wire accept=decode_valid && decode_ready;
     always @(posedge clock) begin
         if (reset || squash_valid || front_fix_pending) queued_count<=0;
         else begin
-            queued_count<=queued_count-(fire?disp_count:2'd0)+2'(accept);
-            if (fire && pair) begin
-                if (accept) queued[0]<=decode_uop;
-            end else if (fire) begin
-                queued[0]<=queued[1];
-                if (accept) begin
-                    if (queued_count==1) queued[0]<=decode_uop;
-                    else queued[1]<=decode_uop;
-                end
-            end else if (accept) begin
-                if (queued_count==0) queued[0]<=decode_uop;
-                else queued[1]<=decode_uop;
+            queued_count<=remaining+(accept?QCW'(decode_count):QCW'(0));
+            for (integer slot=0; slot<QUEUE_DEPTH; slot=slot+1) begin
+                if (fire && slot<int'(remaining))
+                    queued[slot]<=queued[slot+int'(disp_count)];
+                for (integer lane=0; lane<DECODE_WIDTH; lane=lane+1)
+                    if (accept && lane<int'(decode_count) && slot==int'(remaining)+lane)
+                        queued[slot]<=decode_uop[lane*117 +: 117];
             end
         end
     end
 
-    wire a_lane=memory_op[0] && pair;
+    wire a_lane=pair && (memory_op[0] || (two_alu && primary_only[1]));
+    wire a2_lane=!a_lane;
+    assign alu2_dispatch=pair && two_alu;
     wire m_lane=!memory_op[0] && pair;
     wire b_lane=pair;
     wire [MIDW-1:0] mem_id=(kind[m_lane]==3)?MIDW'(sq_alloc_id):MIDW'(lq_alloc_id);
     assign disp_rob={{old_pdst[1],kind[1],sq_alloc_id},{old_pdst[0],kind[0],sq_alloc_id}};
     assign disp_alu={tag[a_lane],cp_alloc_id,op[a_lane],pdst[a_lane],
         ps1[a_lane],ps2[a_lane],pc[a_lane],imm[a_lane]};
+    assign disp_alu2={tag[a2_lane],cp_alloc_id,op[a2_lane],pdst[a2_lane],
+        ps1[a2_lane],ps2[a2_lane],pc[a2_lane],imm[a2_lane]};
     assign disp_mem={tag[m_lane],(op[m_lane][2:0]-3'd6),mem_id,
         ps1[m_lane],ps2[m_lane],imm[m_lane]};
     assign disp_lsq={kind[m_lane]==3,mem_id,tag[m_lane],pdst[m_lane]};
@@ -149,6 +162,8 @@ module rename_dual #(
     end
     assign disp_src1_ready={r1[m_lane],r1[a_lane]};
     assign disp_src2_ready={r2[m_lane],r2[a_lane]};
+    assign alu2_src1_ready=r1[a2_lane];
+    assign alu2_src2_ready=r2[a2_lane];
     assign cp_alloc_valid=fire && branch_op[b_lane];
     assign cp_alloc_payload={cp_alloc_id,tag[b_lane],npc[b_lane]};
     assign front_redirect_valid=front_fix_pending;

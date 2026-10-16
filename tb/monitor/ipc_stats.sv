@@ -67,12 +67,12 @@ endmodule
 
 bind student_top ipc_stats_monitor u_ipc_stats (
     .clock(clock), .reset(reset),
-    .issue_count(32'($countones(alu_cand_take))+32'(mem_cand_take)),
+    .issue_count(32'(alu_cand_take)+32'(alu2_cand_take)+32'(mem_cand_take)),
     .issue_limit(32'(ISSUE_WIDTH)), .dispatch_limit(32'(DISPATCH_WIDTH)), .commit_limit(32'(COMMIT_WIDTH)),
     .wb_count(32'($countones(done_valid))), .wb_limit(32'(WB_WIDTH)),
     .retire_count(32'(u_rob.retire_count)),
     .dispatch_count(disp_fire ? 32'(disp_count) : 32'd0),
-    .any_candidate((|alu_cand_valid) || mem_cand_valid),
+    .any_candidate(alu_cand_valid || alu2_cand_valid || mem_cand_valid),
     .fetch_starved(!fetch_valid && decode_ready),
     .rename_blocked(decode_valid && !decode_ready),
     .rob_full(rob_free == 0), .alu_full(!alu_iq_has_free), .mem_full(!mem_iq_has_free),
@@ -86,6 +86,6 @@ bind student_top ipc_stats_monitor u_ipc_stats (
     .dcache_busy(u_dcache.state != 0 && u_dcache.state != 9),
     .store_hit(u_dcache.hit_store), .load_sent(ld_req_valid && ld_req_ready),
     .cache_wait(ld_req_valid && !ld_req_ready),
-    .wb_conflict(32'($countones(alu_result_valid))+32'(mul_result_valid)+
+    .wb_conflict(32'(alu_result_valid)+32'(alu2_result_valid)+32'(mul_result_valid)+
                  32'(lsu_result_valid) > WB_WIDTH)
 );

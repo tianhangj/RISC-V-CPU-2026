@@ -36,7 +36,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File toolchain/setup.ps1 -Jobs 4
 
 三个脚本自动使用本目录自带的 Python 和工具链，无需激活环境。参数原样传给 `windows.py`，使用上例的双连字符形式。`test.ps1` 运行全部 correctness，`perf.ps1` 运行全部 perf；未指定 `--sim` 时自动构建或复用与当前输入一致的仿真器。默认输出 `build/windows`、构建并行数为逻辑 CPU 数与 8 的较小值、测试并行数 4、上限 100000000 cycles、访存延迟 10。可用 `--jobs`、`--test-jobs`、`--out`、`--filelist`、`--testcases`、`--case`、`--max-cycles`、`--latency` 调整。每个并行仿真进程使用官方 256 MiB RAM，内存较小时降低 `--test-jobs`。
 
-`synth.ps1` 执行 Yosys/ABC 综合与 OpenSTA 时序分析，默认输出 `build/synth/opt`，目标周期 2 ns；可用 `--out`、`--mode`、`--filelist`、`--clock-period` 调整，上例显式使用 5 ns。所有相对参数路径以仓库根目录为基准，脚本也可通过绝对路径从其他目录调用。成功返回 0，失败保留原流程的非零退出码；工具未安装时提示运行 `setup.ps1`。若 PowerShell 的执行策略阻止脚本，可用 `powershell -NoProfile -ExecutionPolicy Bypass -File toolchain/test.ps1 --jobs 4`，其他脚本同理。
+`synth.ps1` 执行 Yosys/ABC 综合与 OpenSTA 时序分析，默认输出 `build/synth/opt`，目标周期 2 ns；可用 `--out`、`--mode`、`--filelist`、`--clock-period` 调整，上例显式使用 5 ns。ABC 默认使用 `--abc-driving-cell INVx1_ASAP7_75t_R --abc-load-ff 5.0`，与课程入口一致，启用缓冲与单元尺寸优化；OpenSTA 的接口负载仍由课程时序脚本规定。所有相对参数路径以仓库根目录为基准，脚本也可通过绝对路径从其他目录调用。成功返回 0，失败保留原流程的非零退出码；工具未安装时提示运行 `setup.ps1`。若 PowerShell 的执行策略阻止脚本，可用 `powershell -NoProfile -ExecutionPolicy Bypass -File toolchain/test.ps1 --jobs 4`，其他脚本同理。
 
 以下命令均使用本目录自带的 Python，不需要修改系统 PATH。`windows.py` 为子进程设置本地工具路径。
 
@@ -58,6 +58,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File toolchain/setup.ps1 -Jobs 4
 
 # ASAP7 面积映射与 OpenSTA 时序分析；目标周期单位为 ns
 .\toolchain\oss-cad-suite\lib\python3.exe toolchain/windows.py synth --out build/windows-synth --clock-period 5
+
+# 调整 ABC 映射约束；默认 RTL 为双分派、双发射
+.\toolchain\synth.ps1 --clock-period 2 --abc-driving-cell INVx1_ASAP7_75t_R --abc-load-ff 5.0
 
 # 单程序运行、波形输出（PROGRAM.bin 及期望值自行替换）
 .\toolchain\oss-cad-suite\lib\python3.exe toolchain/windows.py run PROGRAM.bin --expected 186 --sim build/windows/sim.exe --wave build/windows/trace.vcd
@@ -93,7 +96,7 @@ Windows 入口默认用 `-O3` 编译 C++ 热路径和仿真运行库，保留官
 
 仿真缓存按源码、filelist、字面量 include、监视器、顶层参数、编译选项和工具内容校验；输入不变时跳过编译。兼容配置下的 RTL 修改重新生成模型，由 Make 复用未变化的 C++ 对象。普通与监视构建分别缓存，构建失败不留下可复用的旧二进制。不要手工移动对象目录；路径变化会使缓存失效。
 
-综合复用成功的完整面积/时序结果，并缓存 Yosys elaborate 和映射阶段。源码、库、工具、综合模式、目标周期、时钟端口、课程综合脚本及已有 `abc.constr` 均参与校验；产物缺失或内容变化会重新运行对应阶段。更改目标周期仍重新执行 ABC 映射和 OpenSTA。首次综合沿用官方算法和约束，耗时仍取决于设计规模。
+综合复用成功的完整面积/时序结果，并缓存 Yosys elaborate 和映射阶段。源码、库、工具、综合模式、目标周期、时钟端口、课程综合脚本、ABC 驱动单元与负载参数均参与校验；映射阶段校验输出目录中生成的 `abc.constr`，完整缓存同时校验其内容。产物缺失或内容变化会重新运行对应阶段。更改目标周期或 ABC 参数复用 elaborate，重新执行映射和 OpenSTA。首次综合沿用官方算法和约束，耗时仍取决于设计规模。
 
 默认每次重新运行全部选中的仿真用例。显式加 `--reuse-results` 时，可复用完全相同仿真器、程序、答案、性能指标、周期上限、延迟和超时参数下的成功结果；失败结果不缓存，控制台和 JSON 会标明复用数量。`--force` 要求重新编译/综合，并关闭本次测试结果复用。`--sim` 继续接受用户指定的已有二进制；需要自动检查当前 RTL 时省略该参数。
 
@@ -125,6 +128,9 @@ make fast-perf APPIMAGE= JOBS=8 TEST_JOBS=4 MAX_CYCLES=100000000
 make fast-test APPIMAGE= JOBS=8 MAX_CYCLES=100000000 REUSE_RESULTS=1
 make fast-synth APPIMAGE= CLOCK_PERIOD_NS=2
 make fast-synth APPIMAGE= CLOCK_PERIOD_NS=2 FORCE=1
+make fast-synth APPIMAGE= CLOCK_PERIOD_NS=2 ABC_DRIVING_CELL=BUFx2_ASAP7_75t_R ABC_LOAD_FF=1.0
 ```
 
 也可直接用 `python3 scripts/dev/fast.py test --appimage '' --jobs 8 --test-jobs 4`。开发流程实现放在 `scripts/dev`；`toolchain/windows.py` 和本文档纳入版本控制，下载的工具、源码和安装缓存仍被忽略。
+
+`report-windows.py` 和 Docker 的 `report.py` 均接受 `--clock-period`、`--abc-driving-cell`、`--abc-load-ff`，并把参数传入综合阶段。`make report` 和 `make fast-synth` 同样传递对应的 Make 变量。

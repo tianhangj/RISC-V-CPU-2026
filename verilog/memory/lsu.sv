@@ -1,4 +1,5 @@
 module lsu #(
+    parameter integer FORWARD_WIDTH = 3,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 48,
     parameter integer LQ_DEPTH = 4,
@@ -17,9 +18,9 @@ module lsu #(
     output logic [SIDW-1:0] sq_alloc_id,
     input wire store_data_valid,
     input wire [PW-1:0] store_psrc,
-    input wire [2:0] forward_valid,
-    input wire [3*PW-1:0] forward_pdst,
-    input wire [3*32-1:0] forward_value,
+    input wire [FORWARD_WIDTH-1:0] forward_valid,
+    input wire [FORWARD_WIDTH*PW-1:0] forward_pdst,
+    input wire [FORWARD_WIDTH*32-1:0] forward_value,
     input logic exec_valid,
     input wire read_exec_valid,
     output logic exec_ready,
@@ -437,7 +438,7 @@ module lsu #(
             end
             for (int st=0; st<SQ_DEPTH; st=st+1)
                     if (sq_valid[st] && sq_addr_ready[st] && !sq_data_ready[st])
-                        for (int w=0; w<3; w=w+1)
+                        for (int w=0; w<FORWARD_WIDTH; w=w+1)
                             if (forward_valid[w] && forward_pdst[w*PW +: PW]==sq_psrc[st]) begin
                                 sq_data[st]<=forward_value[w*32 +: 32]; sq_data_ready[st]<=1;
                             end

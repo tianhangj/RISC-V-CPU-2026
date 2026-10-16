@@ -1,5 +1,6 @@
 module wb_arb #(
     parameter integer WB_WIDTH = 2,
+    parameter integer EXTRA_ALU = 0,
     parameter integer ROB_DEPTH = 32,
     parameter integer PRF_SIZE = 48
 ) (
@@ -10,6 +11,9 @@ module wb_arb #(
     input logic alu_result_valid,
     output logic alu_result_ready,
     input logic [RESULT_BITS-1:0] alu_result_payload,
+    input wire alu2_result_valid,
+    output wire alu2_result_ready,
+    input wire [RESULT_BITS-1:0] alu2_result_payload,
     input logic mul_result_valid,
     output logic mul_result_ready,
     input logic [RESULT_BITS-1:0] mul_result_payload,
@@ -24,7 +28,7 @@ module wb_arb #(
 );
     localparam integer RW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1;
     localparam integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1;
-    localparam integer FU_SRC_COUNT = 3;
+    localparam integer FU_SRC_COUNT = 3+EXTRA_ALU;
     localparam integer TAG_BITS = RW;
     localparam integer RESULT_BITS = TAG_BITS + PW + 32;
     logic [WB_WIDTH-1:0] selected_done_valid, selected_write_valid;
@@ -71,6 +75,10 @@ module wb_arb #(
         source_payload[1] = mul_result_payload;
         source_valid[2] = lsu_result_valid;
         source_payload[2] = lsu_result_payload;
+        if (EXTRA_ALU!=0) begin
+            source_valid[3]=alu2_result_valid;
+            source_payload[3]=alu2_result_payload;
+        end
         for (int i = 0; i < FU_SRC_COUNT; i = i + 1)
             discard[i] = source_valid[i] && squash_valid &&
                 ((source_payload[i][RESULT_BITS-1 -: TAG_BITS] - rob_head) > (squash_tag - rob_head));
@@ -105,6 +113,7 @@ module wb_arb #(
         mul_result_ready = source_ready[1];
         lsu_result_ready = source_ready[2];
     end
+    assign alu2_result_ready=EXTRA_ALU!=0 ? source_ready[FU_SRC_COUNT-1] : 1'b0;
     always_ff @(posedge clock) begin
         if (reset) cursor <= 0;
         else cursor <= next_cursor;

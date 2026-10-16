@@ -93,7 +93,9 @@ def run_target(target, report, build_dir, args):
             commands[0].append("--force")
     else:
         commands = [runner + [target, *common, "--out", str(args.cache_dir.resolve() / "synth"),
-                              "--clock-period", str(args.clock_period)]]
+                              "--clock-period", str(args.clock_period),
+                              "--abc-driving-cell", args.abc_driving_cell,
+                              "--abc-load-ff", str(args.abc_load_ff)]]
         if args.force:
             commands[0].append("--force")
     if target in ("test", "perf") and args.reuse_results and not args.force:
@@ -166,11 +168,17 @@ def main():
     parser.add_argument("--perf-max-cycles", type=int, default=10_000_000)
     parser.add_argument("--clock-period", type=float, default=1000.0 / 500.0,
                         help="target clock period in ns (default: 1000/500, 500 MHz)")
+    parser.add_argument("--abc-driving-cell", default="INVx1_ASAP7_75t_R")
+    parser.add_argument("--abc-load-ff", type=float, default=5.0)
     args = parser.parse_args()
     if args.jobs < 1 or args.test_jobs < 1 or len(set(args.targets)) != len(args.targets) or any(not 1 <= v < 2**63 for v in (args.test_max_cycles, args.perf_max_cycles)):
         parser.error("jobs and cycle limits must be positive; cycle limits must be below 2^63")
     if not math.isfinite(args.clock_period) or args.clock_period <= 0:
         parser.error("clock period must be finite and positive")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.abc_driving_cell):
+        parser.error("invalid ABC driving cell name")
+    if not math.isfinite(args.abc_load_ff) or args.abc_load_ff < 0:
+        parser.error("ABC output load must be finite and nonnegative")
     try:
         windows.activate()
         versions = windows.versions()
@@ -182,8 +190,6 @@ def main():
         inputs.update([RAM_SOURCE, ROOT / "scripts/sim.cpp", args.filelist.resolve()])
         inputs.update((ROOT / "scripts").rglob("*.py"))
         inputs.update([ROOT / "scripts/timing.tcl", ROOT / "toolchain/windows.py"])
-        if (ROOT / "abc.constr").is_file():
-            inputs.add(ROOT / "abc.constr")
         hashes = {p.relative_to(ROOT).as_posix() if p.is_relative_to(ROOT) else p.as_posix():
                   hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(inputs)}
         output = args.output_dir.expanduser().resolve()

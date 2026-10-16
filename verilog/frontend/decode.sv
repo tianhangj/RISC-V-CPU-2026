@@ -1,22 +1,24 @@
-module decode (
+module decode #(
+    parameter integer DECODE_WIDTH = 1
+) (
     input logic fetch_valid,
     output logic fetch_ready,
     input logic [DCW-1:0] fetch_count,
-    input logic [FETCH_BITS-1:0] fetch_packet,
+    input logic [DECODE_WIDTH*FETCH_BITS-1:0] fetch_packet,
     output logic decode_valid,
     input logic decode_ready,
     output logic [DCW-1:0] decode_count,
-    output logic [DECODE_BITS-1:0] decode_uop
+    output logic [DECODE_WIDTH*DECODE_BITS-1:0] decode_uop
 );
-    localparam integer DCW = 1;
+    localparam integer DCW = $clog2(DECODE_WIDTH+1);
     localparam integer FETCH_BITS = 96;
     localparam integer DECODE_BITS = 117;
     assign decode_valid = fetch_valid;
     assign fetch_ready = decode_ready;
     assign decode_count = fetch_count;
 
-    begin : g_decode
-        wire [FETCH_BITS-1:0] packet = fetch_packet[FETCH_BITS-1:0];
+    for (genvar lane=0; lane<DECODE_WIDTH; lane=lane+1) begin : g_decode
+        wire [FETCH_BITS-1:0] packet = fetch_packet[lane*FETCH_BITS +: FETCH_BITS];
         wire [31:0] pc = packet[95:64];
         wire [31:0] inst = packet[63:32];
         wire [31:0] pred_npc = packet[31:0];
@@ -113,6 +115,6 @@ module decode (
                 default: begin end
             endcase
         end
-        assign decode_uop[DECODE_BITS-1:0] = {pc, pred_npc, op, rs1, rs2, rd, imm};
+        assign decode_uop[lane*DECODE_BITS +: DECODE_BITS] = {pc, pred_npc, op, rs1, rs2, rd, imm};
     end
 endmodule

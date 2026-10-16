@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 from datetime import datetime
 import os
 from pathlib import Path
@@ -33,7 +34,8 @@ def filename():
     return f"report@{int(now.timestamp())}({commit[:6]})_{slug}.txt", commit, subject
 
 
-def run_target(image, target, report, build_dir, jobs):
+def run_target(image, target, report, build_dir, jobs, clock_period=2.0,
+               abc_driving_cell="INVx1_ASAP7_75t_R", abc_load_ff=5.0):
     if target == "perf":
         make_args = [target, "MAX_CYCLES=10000000"]
     elif target == "test":
@@ -41,6 +43,9 @@ def run_target(image, target, report, build_dir, jobs):
     else:
         make_args = [target]
     make_args.append(f"JOBS={jobs}")
+    if target == "synth":
+        make_args.extend([f"CLOCK_PERIOD_NS={clock_period}",
+                          f"ABC_DRIVING_CELL={abc_driving_cell}", f"ABC_LOAD_FF={abc_load_ff}"])
     if target == "perf" and (build_dir / "sim").is_file():
         make_args.append("SIM=/build/sim")
     command = [
@@ -115,9 +120,18 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/reports",
                         help="report directory (default: build/reports/)")
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--clock-period", type=float, default=2.0)
+    parser.add_argument("--abc-driving-cell", default="INVx1_ASAP7_75t_R")
+    parser.add_argument("--abc-load-ff", type=float, default=5.0)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("jobs must be positive")
+    if not math.isfinite(args.clock_period) or args.clock_period <= 0:
+        parser.error("clock period must be finite and positive")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.abc_driving_cell):
+        parser.error("invalid ABC driving cell name")
+    if not math.isfinite(args.abc_load_ff) or args.abc_load_ff < 0:
+        parser.error("ABC output load must be finite and nonnegative")
 
     try:
         name, commit, subject = filename()
@@ -142,7 +156,8 @@ def main():
             inputs = sorted((ROOT / "verilog").rglob("*.sv")) + sorted((ROOT / "tb/monitor").glob("*.sv"))
             report.write("Source SHA-256: " + json.dumps({str(p.relative_to(ROOT)):
                 hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}, sort_keys=True) + "\n")
-            statuses = {target: run_target(args.image, target, report, build_dir, args.jobs)
+            statuses = {target: run_target(args.image, target, report, build_dir, args.jobs,
+                                          args.clock_period, args.abc_driving_cell, args.abc_load_ff)
                         for target in ("test", "perf", "ipc-profile", "synth")}
             report.write("\n===== Summary =====\n")
             for target, status in statuses.items():

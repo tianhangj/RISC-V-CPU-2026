@@ -23,8 +23,9 @@ module rename_dual_tb;
     wire [31:0] front_redirect_pc;
     rename_dual #(.ROB_DEPTH(8), .PRF_SIZE(40), .LQ_DEPTH(3), .SQ_DEPTH(4), .CHECKPOINT_DEPTH(2)) dut (
         .clock, .reset, .squash_valid, .restore_cp_id(1'b0), .cp_release_mask,
-        .cp_has_free(1'b1), .cp_alloc_id(1'b0), .decode_valid, .decode_ready, .decode_uop,
+        .cp_has_free(1'b1), .cp_alloc_id(1'b0), .decode_valid, .decode_ready, .decode_count(1'b1), .decode_uop,
         .rob_free, .rob_tail, .alu_iq_has_free(1'b1), .mem_iq_has_free(1'b1),
+        .alu2_iq_has_free(1'b0),.disp_alu2(),.alu2_dispatch(),.alu2_src1_ready(),.alu2_src2_ready(),
         .lq_has_free(1'b1), .sq_has_free(1'b1), .lq_alloc_id(2'd1), .sq_alloc_id(2'd2),
         .disp_valid, .disp_ready, .disp_count, .disp_rob, .disp_alu, .disp_mem, .disp_lsq,
         .disp_src1_ready, .disp_src2_ready, .cp_alloc_valid, .cp_alloc_payload,

@@ -1,4 +1,5 @@
 module icache #(
+    parameter integer FETCH_WIDTH = 1,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer ICACHE_SIZE_BYTES = 1024,
     parameter integer ICACHE_WAYS = 2,
@@ -19,10 +20,10 @@ module icache #(
     input logic [IF_RSP_BITS-1:0] if_rsp_payload
 );
     localparam integer FIDW = (FETCH_QUEUE_DEPTH > 1) ? $clog2(FETCH_QUEUE_DEPTH) : 1;
-    localparam integer DCW = 1;
+    localparam integer DCW = $clog2(FETCH_WIDTH+1);
     localparam integer IF_ID_WIDTH = $clog2(ICACHE_LINE_BYTES/4);
     localparam integer IC_REQ_BITS = GEN_WIDTH + FIDW + DCW + 32;
-    localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32;
+    localparam integer IC_RSP_BITS = GEN_WIDTH + FIDW + DCW + 32*FETCH_WIDTH;
     localparam integer IF_REQ_BITS = GEN_WIDTH + IF_ID_WIDTH + 32;
     localparam integer IF_RSP_BITS = GEN_WIDTH + IF_ID_WIDTH + 32;
     localparam integer SETS = ICACHE_SIZE_BYTES/(ICACHE_WAYS*ICACHE_LINE_BYTES);
@@ -67,7 +68,7 @@ module icache #(
     logic [FIDW-1:0] waiter_id;
     logic [DCW-1:0] waiter_count;
     logic [IF_ID_WIDTH-1:0] waiter_word;
-    logic [31:0] rsp_insts;
+    logic [32*FETCH_WIDTH-1:0] rsp_insts;
     wire write_line = fill_busy && !fill_installed && received_count == FCW'(LINE_WORDS);
     wire same_fill = (req_addr >> OFFSET_BITS) == (fill_addr >> OFFSET_BITS);
     wire request_fire = ic_req_valid && ic_req_ready;
@@ -133,11 +134,11 @@ module icache #(
         ic_req_ready = !reset && !fetch_redirect_valid && !write_line && req_addr[31:28] == 0 &&
             (hit_found || !fill_busy || (same_fill && !fill_installed && !waiter_valid));
         rsp_insts = 0;
-        begin
-            if (hit_pending && 0 < hit_count_q)
-                rsp_insts[31:0] = ram_data[int'(hit_way_q)*LINE_BITS+(int'(hit_word_q))*32 +: 32];
-            else if (fill_response && 0 < waiter_count)
-                rsp_insts[31:0] = fill_data[(int'(waiter_word))*32 +: 32];
+        for (int lane=0; lane<FETCH_WIDTH; lane=lane+1) begin
+            if (hit_pending && lane < hit_count_q)
+                rsp_insts[lane*32 +: 32] = ram_data[int'(hit_way_q)*LINE_BITS+(int'(hit_word_q)+lane)*32 +: 32];
+            else if (fill_response && lane < waiter_count)
+                rsp_insts[lane*32 +: 32] = fill_data[(int'(waiter_word)+lane)*32 +: 32];
         end
         // The response belongs to the captured request generation. Recovery
         // clears the frontend owners at the edge; keep this preview independent
