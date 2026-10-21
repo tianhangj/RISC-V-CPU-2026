@@ -120,12 +120,16 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/reports",
                         help="report directory (default: build/reports/)")
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--targets", nargs="+", choices=("test", "perf", "ipc-profile", "synth"),
+                        default=("test", "perf", "synth"))
     parser.add_argument("--clock-period", type=float, default=2.0)
     parser.add_argument("--abc-driving-cell", default="INVx1_ASAP7_75t_R")
     parser.add_argument("--abc-load-ff", type=float, default=5.0)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("jobs must be positive")
+    if len(set(args.targets)) != len(args.targets):
+        parser.error("targets must not repeat")
     if not math.isfinite(args.clock_period) or args.clock_period <= 0:
         parser.error("clock period must be finite and positive")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.abc_driving_cell):
@@ -158,7 +162,7 @@ def main():
                 hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}, sort_keys=True) + "\n")
             statuses = {target: run_target(args.image, target, report, build_dir, args.jobs,
                                           args.clock_period, args.abc_driving_cell, args.abc_load_ff)
-                        for target in ("test", "perf", "ipc-profile", "synth")}
+                        for target in args.targets}
             report.write("\n===== Summary =====\n")
             for target, status in statuses.items():
                 report.write(f"make {target}: {'PASS' if status == 0 else f'FAIL (exit {status})'}\n")

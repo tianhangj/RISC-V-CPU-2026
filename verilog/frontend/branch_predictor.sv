@@ -22,49 +22,19 @@ module branch_predictor #(
     logic [BTAG-1:0] btb_tag [0:BTB_ENTRIES-1];
     logic [31:0] btb_target [0:BTB_ENTRIES-1];
     logic btb_conditional [0:BTB_ENTRIES-1];
-    logic [1:0] bht [0:BHT_ENTRIES-1], bimodal [0:BHT_ENTRIES-1];
-    reg [1:0] chooser [0:BTB_ENTRIES-1];
-    localparam integer HW=8;
-    reg [HW-1:0] global_history;
-    reg [HW-1:0] next_global_history;
-    always @* begin
-        next_global_history=global_history;
-        if (train_valid && train_payload[33])
-                next_global_history=(next_global_history<<1) | HW'(train_payload[32]);
-    end
-    always @(posedge clock) begin
-        if (reset) global_history<=0;
-        else global_history<=next_global_history;
-    end
-    wire [HIW-1:0] train_index;
-    begin : g_history_index
-        wire [BIW-1:0] bi=train_payload[36 +: BIW];
-        assign train_index=train_payload[36 +: HIW] ^
-            HIW'(global_history);
-    end
+    reg [1:0] local_history [0:BTB_ENTRIES-1];
+    logic [1:0] bht [0:BHT_ENTRIES-1];
+    wire [BIW-1:0] train_bi=train_payload[36 +: BIW];
+    wire [HIW-1:0] train_hi=(train_payload[36 +: HIW] << 2) | HIW'(local_history[train_bi]);
     localparam integer COUNTER_GROUPS=(BHT_ENTRIES+7)/8;
-    localparam integer TRAIN_BITS=2+2*HIW;
+    localparam integer TRAIN_BITS=2+HIW;
     wire [COUNTER_GROUPS*TRAIN_BITS-1:0] counter_train;
     begin : g_train_distribution
         (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(TRAIN_BITS), .BRANCHES(COUNTER_GROUPS)) distribute(
-            {train_payload[36 +: HIW],train_index,
+            {train_hi,
              train_payload[32],
              (BP_ENABLE!=0 && train_valid && train_payload[33])},
             counter_train[COUNTER_GROUPS*TRAIN_BITS-1:0]);
-    end
-    for (genvar entry=0; entry<BTB_ENTRIES; entry=entry+1) begin : g_history
-        always @(posedge clock) begin
-            if (reset) chooser[entry]<=1;
-            else if (train_valid && train_payload[33] &&
-                        train_payload[36 +: BIW]==BIW'(entry))
-                        begin
-                            if (bht[train_index][1]!=bimodal[train_payload[36 +: HIW]][1]) begin
-                                if (bht[train_index][1]==train_payload[32]) begin
-                                    if (chooser[entry]!=3) chooser[entry]<=chooser[entry]+1'b1;
-                                end else if (chooser[entry]!=0) chooser[entry]<=chooser[entry]-1'b1;
-                            end
-                        end
-        end
     end
 
     for (genvar lane=0; lane<LOOKUP_WIDTH; lane=lane+1) begin : g_lookup
@@ -75,21 +45,19 @@ module branch_predictor #(
         (* keep_hierarchy, keep *) pc_increment #(.WORDS(1)) increment_next (
             .pc(pc), .next_pc(sequential_pc));
         wire [BIW-1:0] bi = pc[2 +: BIW];
-        wire [HIW-1:0] hi = pc[2 +: HIW] ^
-            HIW'(global_history);
+        wire [HIW-1:0] hi = (pc[2 +: HIW] << 2) | HIW'(local_history[bi]);
         // Decode each index once; avoid binary mux address bits driving every
         // bit of the BTB tag/target arrays after memory lowering.
         wire [BTB_ENTRIES-1:0] hit;
         wire [31:0] target_word [0:BTB_ENTRIES-1];
-        wire [BHT_ENTRIES-1:0] counter_taken, bimodal_taken;
+        wire [BHT_ENTRIES-1:0] counter_taken;
         logic direction;
         logic [31:0] target;
         for (genvar entry = 0; entry < BHT_ENTRIES; entry = entry+1) begin : g_counter_read
             assign counter_taken[entry] = (hi == HIW'(entry)) && bht[entry][1];
-            assign bimodal_taken[entry]=(pc[2 +: HIW]==HIW'(entry)) && bimodal[entry][1];
         end
         always_comb begin
-            direction = chooser[bi][1] ? |counter_taken : |bimodal_taken;
+            direction = |counter_taken;
             target = 0;
             for (int entry = 0; entry < BTB_ENTRIES; entry = entry+1)
                 target = target | target_word[entry];
@@ -132,8 +100,11 @@ module branch_predictor #(
         wire [BIW+1:0] control=write_control[(entry/8)*(BIW+2) +: BIW+2];
         wire write_entry=BP_ENABLE!=0 && control[0] && control[BIW+1:2]==BIW'(entry);
         always @(posedge clock) begin
-            if (control[1]) btb_valid[entry]<=0;
-            else if (write_entry) btb_valid[entry]<=1;
+            if (control[1]) begin btb_valid[entry]<=0; local_history[entry]<=0; end
+            else if (write_entry) begin
+                btb_valid[entry]<=1;
+                if (train_payload[33]) local_history[entry]<={local_history[entry][0],train_payload[32]};
+            end
         end
         begin : g_ram
             sram_fakeram #(.DEPTH(1), .WIDTH(BTAG+33)) word (
@@ -148,15 +119,9 @@ module branch_predictor #(
     end
 
     for (genvar entry = 0; entry < BHT_ENTRIES; entry = entry+1) begin : g_bht
-        logic [1:0] next_counter, next_bimodal;
+        logic [1:0] next_counter;
         always_comb begin
-            next_counter = bht[entry]; next_bimodal=bimodal[entry];
-            if (counter_train[(entry/8)*TRAIN_BITS] &&
-                    counter_train[(entry/8)*TRAIN_BITS+2+HIW +: HIW]==HIW'(entry)) begin
-                    if (counter_train[(entry/8)*TRAIN_BITS+1]) begin
-                        if (next_bimodal!=3) next_bimodal=next_bimodal+1'b1;
-                    end else if (next_bimodal!=0) next_bimodal=next_bimodal-1'b1;
-                end
+            next_counter = bht[entry];
             if (counter_train[(entry/8)*TRAIN_BITS] &&
                     counter_train[(entry/8)*TRAIN_BITS+2 +: HIW]==HIW'(entry)) begin
                     if (counter_train[(entry/8)*TRAIN_BITS+1]) begin
@@ -165,8 +130,8 @@ module branch_predictor #(
                 end
         end
         always_ff @(posedge clock) begin
-            if (reset) begin bht[entry] <= 2'b01; bimodal[entry]<=2'b01; end
-            else begin bht[entry] <= next_counter; bimodal[entry]<=next_bimodal; end
+            if (reset) bht[entry] <= 2'b01;
+            else bht[entry] <= next_counter;
         end
     end
 endmodule

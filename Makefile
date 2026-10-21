@@ -67,7 +67,7 @@ help:
 	@echo 'make branch-accuracy [Case=perf_qsort BP_WB_WIDTH=2 BP_COMMIT_WIDTH=2 BP_ENABLE=1]'
 	@echo '  JSON/CSV and per-PC statistics: BP_STATS_OUT (default BUILD/branch-accuracy)'
 	@echo 'make report [IMAGE=cpu2026:latest REPORT_OUT=build/reports JOBS=1]'
-	@echo '  Runs correctness, perf, IPC profiling and synth sequentially in Docker.'
+	@echo '  Runs correctness, perf and synth sequentially in Docker; IPC profiling is optional.'
 	@echo 'make perf [Case=perf_median] [SIM=/path/to/prebuilt/sim]'
 	@echo 'make synth [MODE=opt|diagnose CLOCK_PERIOD_NS=2.0 FILELIST=verilog/filelist.f]'
 	@echo '  ABC constraints: ABC_DRIVING_CELL=INVx1_ASAP7_75t_R ABC_LOAD_FF=5.0'

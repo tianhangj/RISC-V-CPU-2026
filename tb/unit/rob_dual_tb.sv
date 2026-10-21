@@ -17,7 +17,7 @@ module rob_dual_tb;
         .rob_free, .rob_tail, .rob_head, .reg_commit_valid, .reg_commit_payload,
         .st_start_valid, .st_start_id, .st_done_valid);
     task tick;
-        begin @(posedge clock); #1; end
+        begin @(posedge clock); #1; done_valid=0; end
     endtask
     task allocate(input [1:0] count, input [PW-1:0] old0, old1);
         begin
@@ -29,7 +29,7 @@ module rob_dual_tb;
     task complete_pair(input [1:0] tag0, tag1);
         begin
             @(negedge clock); done_valid=3; done_tag={tag1,tag0};
-            tick; @(negedge clock); done_valid=0;
+            #1; // WB completion is visible to retirement before this edge.
         end
     endtask
     initial begin

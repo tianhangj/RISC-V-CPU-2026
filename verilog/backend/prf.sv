@@ -13,6 +13,7 @@ module prf #(
     localparam integer PW = (PRF_SIZE > 1) ? $clog2(PRF_SIZE) : 1;
     localparam integer BANK_COUNT = (PRF_SIZE + 7) / 8;
     logic [31:0] cells [0:PRF_SIZE-1];
+    assign cells[0]=32'b0;
     wire [BANK_COUNT*WB_WIDTH*32-1:0] bank_write_value;
     wire [WB_WIDTH*8-1:0] write_low_select;
     wire [BANK_COUNT*WB_WIDTH*8-1:0] bank_word_select;
@@ -42,50 +43,7 @@ module prf #(
         distribute_reset(reset, word_reset);
     for (genvar p = 0; p < READ_PORTS; p = p + 1) begin : g_read
         wire [PW-1:0] addr = rd_addr[p*PW +: PW];
-        wire [7:0] low_select;
-        wire [BANK_COUNT*8-1:0] bank_low_select;
-        wire [BANK_COUNT-1:0] high_select;
-        logic [31:0] bank_data [0:BANK_COUNT-1];
-        wire [31:0] masked_bank [0:BANK_COUNT-1];
-        logic [31:0] read_value;
-        (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(8), .BRANCHES(BANK_COUNT))
-            distribute_low_select(low_select, bank_low_select);
-
-        for (genvar low = 0; low < 8; low = low + 1) begin : g_low_decode
-            localparam logic [2:0] LOW_INDEX = low;
-            assign low_select[low] = (addr[2:0] == LOW_INDEX);
-        end
-        for (genvar bank = 0; bank < BANK_COUNT; bank = bank + 1) begin : g_bank
-            localparam logic [PW-1:0] BANK_INDEX = bank;
-            wire [31:0] word_data [0:7];
-            wire [1:0] bank_enable;
-            assign high_select[bank] = ((addr >> 3) == BANK_INDEX);
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2))
-                distribute_bank_enable(high_select[bank], bank_enable);
-            for (genvar low = 0; low < 8; low = low + 1) begin : g_word
-                localparam integer CELL_INDEX = 8*bank + low;
-                if (CELL_INDEX == 0 || CELL_INDEX >= PRF_SIZE) begin : g_zero
-                    assign word_data[low] = 32'b0;
-                end else begin : g_cell
-                    assign word_data[low] = cells[CELL_INDEX];
-                end
-            end
-            always_comb begin
-                bank_data[bank] = 32'b0;
-                for (int low = 0; low < 8; low = low + 1)
-                    bank_data[bank] = bank_data[bank] |
-                                      (word_data[low] & {32{bank_low_select[bank*8+low]}});
-            end
-            for (genvar half = 0; half < 2; half = half+1) begin : g_mask_bank
-                assign masked_bank[bank][half*16 +: 16] =
-                    bank_data[bank][half*16 +: 16] & {16{bank_enable[half]}};
-            end
-        end
-        always_comb begin
-            read_value = 32'b0;
-            for (int bank = 0; bank < BANK_COUNT; bank = bank + 1)
-                read_value = read_value | masked_bank[bank];
-        end
+        wire [31:0] read_value = addr<PRF_SIZE ? cells[addr] : 32'b0;
         wire [WB_WIDTH*2-1:0] previous_select;
         wire [1:0] read_zero;
         reg [31:0] bypassed_value;
@@ -102,6 +60,10 @@ module prf #(
                 for (integer half=0; half<2; half=half+1)
                     if (previous_select[w*2+half])
                         bypassed_value[half*16 +: 16]=last_value[w*32+half*16 +: 16];
+            // The registered WB packet is readable before its PRF write edge.
+            for (integer w=0; w<WB_WIDTH; w=w+1)
+                if (write_valid[w] && write_pdst[w*PW +: PW]==addr)
+                    bypassed_value=write_value[w*32 +: 32];
             for (integer half=0; half<2; half=half+1)
                 if (read_zero[half]) bypassed_value[half*16 +: 16]=0;
         end

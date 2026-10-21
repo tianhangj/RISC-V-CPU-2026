@@ -1,14 +1,14 @@
 module student_top #(
     parameter integer DISPATCH_WIDTH = 2,
     parameter integer ISSUE_WIDTH = 2,
-    parameter integer WB_WIDTH = 2,
+    parameter integer WB_WIDTH = 3,
     parameter integer COMMIT_WIDTH = 2,
-    parameter integer ROB_DEPTH = 32,
-    parameter integer PRF_SIZE = 56,
-    parameter integer IQ_ALU_DEPTH = 7,
-    parameter integer IQ_MEM_DEPTH = 4,
-    parameter integer LQ_DEPTH = 8,
-    parameter integer SQ_DEPTH = 8,
+    parameter integer ROB_DEPTH = 64,
+    parameter integer PRF_SIZE = 80,
+    parameter integer IQ_ALU_DEPTH = 10,
+    parameter integer IQ_MEM_DEPTH = 8,
+    parameter integer LQ_DEPTH = 12,
+    parameter integer SQ_DEPTH = 16,
     parameter integer FETCH_QUEUE_DEPTH = 16,
     parameter integer IFETCH_OUTSTANDING = 8,
     parameter integer ICACHE_SIZE_BYTES = 2048,
@@ -16,14 +16,13 @@ module student_top #(
     parameter integer ICACHE_LINE_BYTES = 64,
     parameter integer DCACHE_SIZE_BYTES = 16384,
     parameter integer DCACHE_WAYS = 2,
-    parameter integer DCACHE_LINE_BYTES = 64,
-    parameter integer DATA_PREFETCH = 1,
+    parameter integer DCACHE_LINE_BYTES = 128,
     parameter integer BP_ENABLE = 1,
-    parameter integer BTB_ENTRIES = 64,
-    parameter integer BHT_ENTRIES = 256,
-    parameter integer LOAD_OUTSTANDING = 8,
+    parameter integer BTB_ENTRIES = 128,
+    parameter integer BHT_ENTRIES = 512,
+    parameter integer LOAD_OUTSTANDING = 12,
     parameter integer AXI_RD_OUTSTANDING = 16,
-    parameter integer CHECKPOINT_DEPTH = 4,
+    parameter integer CHECKPOINT_DEPTH = 8,
     parameter integer GEN_WIDTH = 16,
     parameter [31:0] RESET_PC = 32'h00000000
 ) (
@@ -79,8 +78,8 @@ module student_top #(
     if (GEN_WIDTH < 1 || RESET_PC[1:0] != 0) begin : g_invalid_8
         initial $fatal(1, "GEN_WIDTH must be positive and RESET_PC word aligned");
     end
-    if ((BP_ENABLE != 0 && BP_ENABLE != 1) || (DATA_PREFETCH != 0 && DATA_PREFETCH != 1)) begin : g_invalid_9
-        initial $fatal(1, "BP_ENABLE and DATA_PREFETCH must be 0 or 1");
+    if (BP_ENABLE != 0 && BP_ENABLE != 1) begin : g_invalid_9
+        initial $fatal(1, "BP_ENABLE must be 0 or 1");
     end
     if (BTB_ENTRIES < 2 || BTB_ENTRIES > 536870912 || (BTB_ENTRIES & (BTB_ENTRIES-1)) != 0 || BHT_ENTRIES < 2 || BHT_ENTRIES > 1073741824 || (BHT_ENTRIES & (BHT_ENTRIES-1)) != 0) begin : g_invalid_10
         initial $fatal(1, "prediction tables must be powers of two within address index limits");
@@ -140,13 +139,7 @@ module student_top #(
     localparam integer DC_WORD_W = $clog2(DCACHE_LINE_BYTES/4);
     localparam integer MEM_LD_BITS = GEN_WIDTH + DC_WORD_W + 32;
     wire mem_ld_req_valid, mem_ld_req_ready, mem_ld_rsp_valid;
-    wire line_req_valid, line_req_ready, line_rsp_valid;
-    wire [DCACHE_LINE_BYTES*8-1:0] line_rsp_data;
     wire [MEM_LD_BITS-1:0] mem_ld_req_payload, mem_ld_rsp_payload;
-    localparam integer PREFETCH_ID_BITS=DATA_PREFETCH!=0?2:0;
-    localparam integer AXI_LD_BITS=MEM_LD_BITS+PREFETCH_ID_BITS;
-    wire axi_ld_req_valid, axi_ld_req_ready, axi_ld_rsp_valid;
-    wire [AXI_LD_BITS-1:0] axi_ld_req_payload, axi_ld_rsp_payload;
     wire mem_st_req_valid, mem_st_req_ready, mem_st_rsp_valid;
     wire [67:0] mem_st_req_payload;
 
@@ -206,7 +199,7 @@ module student_top #(
     logic  alu_exec_valid, alu_exec_ready;
     logic [ALU_EXEC_BITS-1:0] alu_exec_payload;
     logic mul_exec_valid, mul_exec_ready, mem_exec_valid, mem_exec_ready;
-    wire mem_exec_preview_valid;
+    wire mem_addr_valid;
     logic [MUL_EXEC_BITS-1:0] mul_exec_payload;
     logic [MEM_EXEC_BITS-1:0] mem_exec_payload;
     logic  alu_result_valid, alu_result_ready, resolve_valid;
@@ -375,7 +368,7 @@ module student_top #(
         .early_wake_valid, .early_wake_pdst, .branch_exec_valid, .branch_operand1, .branch_operand2,
         .alu_exec_valid, .alu_exec_ready, .alu_exec_payload,
         .mul_exec_valid, .mul_exec_ready, .mul_exec_payload,
-        .mem_exec_valid, .mem_exec_preview_valid, .mem_exec_ready, .mem_exec_payload);
+        .mem_exec_valid, .mem_addr_valid, .mem_exec_ready, .mem_exec_payload);
     if (ISSUE_WIDTH==2) begin : g_dual_ports
         assign rd_addr={select_extra?secondary_rd_addr:primary_rd_addr[2*PW +: 2*PW],
                         primary_rd_addr[0 +: 2*PW]};
@@ -403,7 +396,7 @@ module student_top #(
             .early_wake_valid(alu2_early_wake_valid),.early_wake_pdst(alu2_early_wake_pdst),
             .alu_exec_valid(alu2_exec_valid),.alu_exec_ready(alu2_exec_ready),.alu_exec_payload(alu2_exec_payload),
             .mul_exec_valid(),.mul_exec_ready(1'b0),.mul_exec_payload(),
-            .mem_exec_valid(),.mem_exec_preview_valid(),.mem_exec_ready(1'b0),.mem_exec_payload());
+            .mem_exec_valid(),.mem_addr_valid(),.mem_exec_ready(1'b0),.mem_exec_payload());
         alu #(.ROB_DEPTH(ROB_DEPTH),.PRF_SIZE(PRF_SIZE),.CHECKPOINT_DEPTH(CHECKPOINT_DEPTH)) execute (
             .clock,.reset,.squash_valid,.squash_tag,.rob_head,
             .exec_valid(alu2_exec_valid),.exec_ready(alu2_exec_ready),.exec_payload(alu2_exec_payload),
@@ -444,7 +437,7 @@ module student_top #(
         .clock, .reset, .squash_valid(distributed_squash[(6)*(RW+1)+RW]), .squash_tag(distributed_squash[(6)*(RW+1) +: RW]), .rob_head(distributed_head[(5)*RW +: RW]), .current_gen,
         .disp_valid(mem_disp_valid), .disp_lsq, .lq_has_free, .sq_has_free,
         .lq_alloc_id, .sq_alloc_id,
-        .exec_valid(mem_exec_valid), .read_exec_valid(mem_exec_preview_valid), .exec_ready(mem_exec_ready), .exec_payload(mem_exec_payload),
+        .exec_valid(mem_exec_valid), .addr_valid(mem_addr_valid), .exec_ready(mem_exec_ready), .exec_payload(mem_exec_payload),
         .store_data_valid(mem_store_data_valid), .store_psrc(mem_store_psrc),
         .forward_valid(distributed_completion[4*WAKE_SINK_BITS+COMPLETION_WIDTH*PW +: COMPLETION_WIDTH]),
         .forward_pdst(distributed_completion[4*WAKE_SINK_BITS +: COMPLETION_WIDTH*PW]), .forward_value(completion_value),
@@ -460,36 +453,19 @@ module student_top #(
         .mul_result_valid, .mul_result_ready, .mul_result_payload,
         .lsu_result_valid, .lsu_result_ready, .lsu_result_payload,
         .done_valid, .done_tag, .write_valid, .write_pdst, .write_value);
-    dcache #(.BULK_REFILL(DATA_PREFETCH), .SIZE_BYTES(DCACHE_SIZE_BYTES), .WAYS(DCACHE_WAYS), .LINE_BYTES(DCACHE_LINE_BYTES), .LQ_DEPTH(LQ_DEPTH), .GEN_WIDTH(GEN_WIDTH)) u_dcache (
+    dcache #(.SIZE_BYTES(DCACHE_SIZE_BYTES), .WAYS(DCACHE_WAYS), .LINE_BYTES(DCACHE_LINE_BYTES), .LQ_DEPTH(LQ_DEPTH), .GEN_WIDTH(GEN_WIDTH)) u_dcache (
         .clock, .reset, .ld_req_valid, .ld_req_ready, .ld_req_payload,
         .ld_rsp_valid, .ld_rsp_payload, .st_req_valid, .st_req_ready,
         .st_req_payload, .st_rsp_valid,
         .mem_ld_req_valid, .mem_ld_req_ready, .mem_ld_req_payload,
         .mem_ld_rsp_valid, .mem_ld_rsp_payload, .mem_st_req_valid,
-        .mem_st_req_ready, .mem_st_req_payload, .mem_st_rsp_valid,
-        .line_req_valid, .line_req_ready, .line_rsp_valid, .line_rsp_data);
-    generate if (DATA_PREFETCH!=0) begin : g_prefetch
-    data_prefetch #(.LINE_BYTES(DCACHE_LINE_BYTES), .GEN_WIDTH(GEN_WIDTH)) prefetch (
-        .clock, .reset, .dc_req_valid(mem_ld_req_valid), .dc_req_ready(mem_ld_req_ready),
-        .dc_req_payload(mem_ld_req_payload), .dc_rsp_valid(mem_ld_rsp_valid), .dc_rsp_payload(mem_ld_rsp_payload),
-        .mem_req_valid(axi_ld_req_valid), .mem_req_ready(axi_ld_req_ready), .mem_req_payload(axi_ld_req_payload),
-        .mem_rsp_valid(axi_ld_rsp_valid), .mem_rsp_payload(axi_ld_rsp_payload),
-        .write_fire(mem_st_req_valid && mem_st_req_ready), .write_addr(mem_st_req_payload[67:36]),
-        .line_req_valid, .line_req_ready, .line_rsp_valid, .line_rsp_data);
-    end else begin : g_no_prefetch
-        assign line_req_ready=0; assign line_rsp_valid=0; assign line_rsp_data=0;
-        assign axi_ld_req_valid=mem_ld_req_valid;
-        assign axi_ld_req_payload=mem_ld_req_payload;
-        assign mem_ld_req_ready=axi_ld_req_ready;
-        assign mem_ld_rsp_valid=axi_ld_rsp_valid;
-        assign mem_ld_rsp_payload=axi_ld_rsp_payload;
-    end endgenerate
-    axi_bridge #(.LD_ID_WIDTH(DC_WORD_W+PREFETCH_ID_BITS), .AXI_RD_OUTSTANDING(AXI_RD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH), .IF_ID_WIDTH(IF_ID_WIDTH)) u_axi (
+        .mem_st_req_ready, .mem_st_req_payload, .mem_st_rsp_valid);
+    axi_bridge #(.LD_ID_WIDTH(DC_WORD_W), .AXI_RD_OUTSTANDING(AXI_RD_OUTSTANDING), .GEN_WIDTH(GEN_WIDTH), .IF_ID_WIDTH(IF_ID_WIDTH)) u_axi (
         .clock, .reset, .if_req_valid, .if_req_ready, .if_req_payload,
         .if_rsp_valid, .if_rsp_payload,
-        .ld_req_valid(axi_ld_req_valid), .ld_req_ready(axi_ld_req_ready),
-        .ld_req_payload(axi_ld_req_payload), .ld_rsp_valid(axi_ld_rsp_valid),
-        .ld_rsp_payload(axi_ld_rsp_payload), .st_req_valid(mem_st_req_valid),
+        .ld_req_valid(mem_ld_req_valid), .ld_req_ready(mem_ld_req_ready),
+        .ld_req_payload(mem_ld_req_payload), .ld_rsp_valid(mem_ld_rsp_valid),
+        .ld_rsp_payload(mem_ld_rsp_payload), .st_req_valid(mem_st_req_valid),
         .st_req_ready(mem_st_req_ready), .st_req_payload(mem_st_req_payload),
         .st_rsp_valid(mem_st_rsp_valid), .araddr, .arvalid, .arready, .rdata, .rresp, .rvalid,
         .rready, .awaddr, .awvalid, .awready, .wdata, .wstrb, .wvalid,

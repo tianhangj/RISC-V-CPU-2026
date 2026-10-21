@@ -22,7 +22,7 @@ module lsu #(
     input wire [FORWARD_WIDTH*PW-1:0] forward_pdst,
     input wire [FORWARD_WIDTH*32-1:0] forward_value,
     input logic exec_valid,
-    input wire read_exec_valid,
+    input wire addr_valid,
     output logic exec_ready,
     input logic [MEM_EXEC_BITS-1:0] exec_payload,
     output logic result_valid,
@@ -101,6 +101,18 @@ module lsu #(
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2*LQ_DEPTH))
         distribute_exec_ram(exec_addr[31:28]==0,exec_ram_control);
     wire [31:0] exec_data = exec_payload[31:0];
+    // Address preparation is speculative. A killed read may transfer on the
+    // recovery edge, but its invalid LQ owner can never produce completion.
+    wire agu_load=addr_valid && exec_op<5;
+    wire [31:0] schedule_addr [0:LQ_DEPTH-1];
+    wire [2:0] schedule_op [0:LQ_DEPTH-1];
+    wire [LQ_DEPTH-1:0] schedule_valid;
+    for (genvar l=0; l<LQ_DEPTH; l=l+1) begin : g_agu_schedule
+        wire incoming=agu_load && exec_id==MIDW'(l) && lq_state[l]==0;
+        assign schedule_addr[l]=incoming?exec_addr:lq_addr[l];
+        assign schedule_op[l]=incoming?exec_op:lq_op[l];
+        assign schedule_valid[l]=lq_state[l]==1 || (incoming && exec_ram_control[2*l]);
+    end
     wire next_write=write_complete && commit_count>1;
     wire [SIDW-1:0] next_write_id=commit_fifo[SIDW'(commit_head+1'b1)];
     wire [66:0] write_candidates [0:1];
@@ -279,7 +291,7 @@ module lsu #(
         end
     end
     for (genvar l=0; l<LQ_DEPTH; l=l+1) begin : g_load_forward
-        wire [3:0] mask=byte_mask(lq_op[l],lq_addr[l][1:0]);
+        wire [3:0] mask=byte_mask(schedule_op[l],schedule_addr[l][1:0]);
         wire before_head=lq_rob[l]<rob_head;
         wire [SQ_DEPTH-1:0] unknown_address, overlapping, newest, usable;
         wire [31:0] selected_data [0:SQ_DEPTH-1];
@@ -294,7 +306,7 @@ module lsu #(
             wire [1:0] data_select;
             assign unknown_address[st]=eligible && !sq_addr_ready[st];
             assign overlapping[st]=eligible && sq_addr_ready[st] &&
-                sq_addr[st][31:2]==lq_addr[l][31:2] && (store_mask[st] & mask)!=0;
+                sq_addr[st][31:2]==schedule_addr[l][31:2] && (store_mask[st] & mask)!=0;
             assign newest[st]=overlapping[st] && !(|(sq_younger[st] & overlapping));
             assign usable[st]=newest[st] && sq_data_ready[st] &&
                 (store_mask[st] & mask)==mask;
@@ -308,9 +320,9 @@ module lsu #(
             for (integer st=0; st<SQ_DEPTH; st=st+1) word=word | selected_data[st];
         end
         assign load_forward_value[l]=word;
-        assign load_forward_valid[l]=lq_state[l]==1 && !(|unknown_address) &&
-            (|usable) && lq_addr[l][31:28]==0;
-        assign load_ready[l]=lq_valid[l] && lq_state[l]==1 && !(|unknown_address) &&
+        assign load_forward_valid[l]=schedule_valid[l] && !(|unknown_address) &&
+            (|usable) && schedule_addr[l][31:28]==0;
+        assign load_ready[l]=lq_valid[l] && schedule_valid[l] && !(|unknown_address) &&
             (!(|overlapping) || load_forward_valid[l]) &&
             !(offer_valid && offer_id==LIDW'(l));
     end
@@ -353,13 +365,15 @@ module lsu #(
         assign result_payload[BASE +: BITS]=result_held_select[chunk]?
             result_q[BASE +: BITS]:selected_result[BASE +: BITS];
     end
-    // Offers address RAM only. A read accepted on the squash edge is harmless:
+    // EX address generation and MEM request selection share one edge. A read
+    // accepted on the squash edge is harmless:
     // its original generation still identifies the later, discarded response.
     // The single-issue path bypasses an empty request buffer. If the cache or
     // read credits stall it, the selected address/gen/id are held from the edge.
     assign ld_req_valid = (offer_valid || (chosen_load >= 0 && !forward_load)) &&
         outstanding_q < LOAD_OUTSTANDING;
-    assign ld_req_payload = {request_gen, request_id, lq_addr[request_id] & 32'hfffffffc};
+    assign ld_req_payload = {request_gen, request_id,
+        (offer_valid?lq_addr[request_id]:schedule_addr[request_id]) & 32'hfffffffc};
     // ROB authorization already identifies a completed, non-speculative Store.
     // Send it immediately; the commit FIFO and write_sent retain the offer if the cache
     // applies backpressure or until its response arrives.
@@ -408,7 +422,7 @@ module lsu #(
             end
             for (int l=0; l<LQ_DEPTH; l=l+1)
                 if (load_select[l] && load_forward_valid[l]) begin
-                    lq_data[l]<=load_extend(lq_op[l],lq_addr[l][1:0],load_forward_value[l]);
+                    lq_data[l]<=load_extend(schedule_op[l],schedule_addr[l][1:0],load_forward_value[l]);
                     lq_state[l]<=3;
                 end
             if (result_busy && (result_fire ||
@@ -456,7 +470,10 @@ module lsu #(
                         if (exec_id[LIDW-1:0]==LIDW'(l)) begin
                             lq_addr[l]<=exec_addr;
                             lq_op[l]<=exec_op;
-                            if (exec_ram_control[2*l+1]) lq_state[l]<=1;
+                            if (exec_ram_control[2*l+1]) begin
+                                if (load_select[l] && load_forward_valid[l]) lq_state[l]<=3;
+                                else lq_state[l]<=1;
+                            end
                             else begin lq_state[l]<=3; lq_data[l]<=0; end
                         end
                 end

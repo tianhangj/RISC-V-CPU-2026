@@ -2,7 +2,6 @@
 // a miss transfers a complete line through the pipelined AXI bridge.
 module dcache #(
     parameter integer SIZE_BYTES = 16384,
-    parameter integer BULK_REFILL = 0,
     parameter integer WAYS = 2,
     parameter integer LINE_BYTES = 64,
     parameter integer LQ_DEPTH = 4,
@@ -26,10 +25,7 @@ module dcache #(
     output wire mem_st_req_valid,
     input wire mem_st_req_ready,
     output wire [67:0] mem_st_req_payload,
-    input wire mem_st_rsp_valid,
-    output wire line_req_valid, input wire line_req_ready,
-    input wire line_rsp_valid,
-    input wire [LINE_BYTES*8-1:0] line_rsp_data
+    input wire mem_st_rsp_valid
 );
     localparam integer LIDW = (LQ_DEPTH > 1) ? $clog2(LQ_DEPTH) : 1;
     localparam integer WORDS = LINE_BYTES / 4;
@@ -50,10 +46,7 @@ module dcache #(
         WRITE_WAIT = 3, REFILL = 4, INSTALL = 5, FLUSH_SCAN = 6,
         IO_SEND = 7, IO_WAIT = 8, PROBE = 9;
     (* keep *) reg [3:0] state;
-    reg bulk_busy, probe_partial;
-    wire bulk_response=BULK_REFILL!=0 && line_rsp_valid;
-    assign line_req_valid=BULK_REFILL!=0 && state==REFILL && sent_count==0 && !bulk_busy;
-    wire bulk_fire=line_req_valid && line_req_ready;
+    reg probe_partial;
     // Metadata is flattened as way*SETS+set, including during MMIO drain.
     reg [LINES-1:0] valid, dirty;
     reg [WAY_W-1:0] replace_way [0:SETS-1];
@@ -69,7 +62,7 @@ module dcache #(
     reg [TAG_W-1:0] victim_tag;
     reg [LINE_BITS-1:0] victim_data;
     reg [COUNT_W-1:0] sent_count, received_count;
-    reg miss_pending, store_pending;
+    reg store_pending;
     reg [WORDS-1:0] refill_valid;
     reg refill_hit_pending;
     reg [LD_BITS-1:0] refill_hit_response;
@@ -78,7 +71,8 @@ module dcache #(
         (ld_req_payload[31:OFFSET_W]==request_addr[31:OFFSET_W]) &&
         !(mem_ld_rsp_valid && response_word==request_word && !request_store);
     wire refill_load_fire=ld_req_valid && refill_load_ready;
-    reg [LD_BITS-1:0] miss_response;
+    wire critical_response=state==REFILL && mem_ld_rsp_valid &&
+        response_word==request_word && !request_store;
     reg hum_pending, hum_probe, hum_retry, hum_held;
     reg [LD_BITS-1:0] hum_request;
     reg [31:0] hum_data;
@@ -95,11 +89,12 @@ module dcache #(
         end
     end
     reg hum_hit;
+    reg [WAY_W-1:0] hum_hit_way;
     reg [31:0] hum_hit_data;
-    wire primary_response=hit_load || miss_pending || refill_hit_pending || (bulk_response && !request_store);
+    wire primary_response=hit_load || critical_response || refill_hit_pending;
     wire hum_response=hum_pending && (hum_held || (hum_probe && hum_hit)) && !primary_response;
     wire hum_can_read=state==REFILL && !mem_ld_rsp_valid &&
-        !bulk_busy && !bulk_response && !hum_pending && !refill_load_ready;
+        !hum_pending && !refill_load_ready;
     wire hum_accept=ld_req_valid && hum_can_read;
     wire replay_hum=hum_pending && hum_retry && state==IDLE;
 
@@ -182,10 +177,11 @@ module dcache #(
         end
     end
     always @* begin
-        hum_hit=0; hum_hit_data=0;
+        hum_hit=0; hum_hit_data=0; hum_hit_way=0;
         for (integer way=0; way<WAYS; way=way+1)
             if (hum_valid[way] && tag_rdata[way*TAG_W +: TAG_W]==hum_request[31 -: TAG_W]) begin
                 hum_hit=1;
+                hum_hit_way=WAY_W'(way);
                 hum_hit_data=hum_probe_words[way*32 +: 32];
             end
     end
@@ -233,8 +229,8 @@ module dcache #(
     wire [RESPONSE_GROUPS-1:0] hum_response_choice;
     wire [LD_BITS-1:0] hum_payload={hum_request[LD_BITS-1:32],hum_held?hum_data:hum_hit_data};
     wire [LD_BITS-1:0] primary_payload=
-        bulk_response ? {request_identity,bulk_word} :
-        state == PROBE ? {request_identity, hit_word} : refill_hit_pending ? refill_hit_response : miss_response;
+        critical_response ? {request_identity,mem_ld_rsp_payload[31:0]} :
+        state == PROBE ? {request_identity,hit_word} : refill_hit_response;
     (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(RESPONSE_GROUPS))
         distribute_hum_response(hum_response,hum_response_choice);
     for (genvar chunk=0; chunk<RESPONSE_GROUPS; chunk=chunk+1) begin : g_response_payload
@@ -254,11 +250,10 @@ module dcache #(
     // Select the requested word in each way before the tag-dependent way mux.
     // A hit now controls only 32 data bits instead of the complete cache line.
     wire [WAYS*32-1:0] probe_words;
-    wire [(WAYS+1)*8*WORD_W-1:0] probe_word_select;
-    wire [31:0] bulk_word;
+    wire [WAYS*8*WORD_W-1:0] probe_word_select;
     wire [2*WAY_W-1:0] probe_way_select;
     wire [31:0] hit_word;
-    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES((WAYS+1)*8))
+    (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WORD_W), .BRANCHES(WAYS*8))
         distribute_probe_word(request_word,probe_word_select);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(WAY_W), .BRANCHES(2))
         distribute_probe_way(hit_way,probe_way_select);
@@ -267,10 +262,6 @@ module dcache #(
             wire [WORD_W-1:0] word_index=probe_word_select[(w*8+part)*WORD_W +: WORD_W];
             assign probe_words[w*32+part*4 +: 4]=way_rdata[w*LINE_BITS+32*word_index+part*4 +: 4];
         end
-    end
-    for (genvar part=0; part<8; part=part+1) begin : g_bulk_word
-        wire [WORD_W-1:0] word_index=probe_word_select[(WAYS*8+part)*WORD_W +: WORD_W];
-        assign bulk_word[part*4 +: 4]=line_rsp_data[32*word_index+part*4 +: 4];
     end
     for (genvar h=0; h<2; h=h+1) begin : g_hit_word
         wire [WAY_W-1:0] way_index=probe_way_select[h*WAY_W +: WAY_W];
@@ -306,12 +297,6 @@ module dcache #(
             ram_addr = request_set;
             ram_mask[4*response_word +: 4] = 4'b1111;
         end
-        if (bulk_response) begin
-            ram_en=1; ram_we=1; ram_addr=request_set; ram_way=victim_way;
-            // The distributed bulk mux selects the complete line below.
-            // Leave the ordinary word data independent of the bulk control.
-            ram_mask={LINE_BYTES{1'b1}};
-        end
         if (state == INSTALL && request_store) begin
             ram_en = 1;
             ram_we = 1;
@@ -330,8 +315,6 @@ module dcache #(
         distribute_bank_address(ram_addr,bank_address);
     // Every way has its own tag and word banks. Probe reads all ways in
     // parallel; Store/refill/flush enables select only the affected way.
-    wire [WORDS*2-1:0] bulk_select;
-    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(WORDS*2)) distribute_bulk(bulk_response,bulk_select);
     wire [WORDS*32-1:0] bank_wdata;
     wire [WORDS*32-1:0] store_word_data, refill_word_data;
     wire [WORDS*2-1:0] refill_select;
@@ -345,8 +328,7 @@ module dcache #(
         distribute_refill_select(state==REFILL,refill_select);
     for (genvar word=0; word<WORDS; word=word+1) begin : g_write_data
         for (genvar h=0; h<2; h=h+1) begin : g_half
-            assign bank_wdata[word*32+h*16 +: 16]=bulk_select[word*2+h]?
-                line_rsp_data[word*32+h*16 +: 16]:refill_select[word*2+h]?
+            assign bank_wdata[word*32+h*16 +: 16]=refill_select[word*2+h]?
                 refill_word_data[word*32+h*16 +: 16]:store_word_data[word*32+h*16 +: 16];
         end
     end
@@ -390,11 +372,16 @@ module dcache #(
             else if (state == INSTALL && request_set == SET_W'(s))
                 replace_way[s] <= victim_way == WAY_W'(WAYS-1) ?
                     WAY_W'(0) : victim_way + 1'b1;
+            // Two ways need only one bit for exact LRU. Both normal hits and
+            // hits under refill make the other way the next victim.
+            else if (WAYS == 2 && (hit_load || hit_store) && request_set == SET_W'(s))
+                replace_way[s] <= hit_way ^ WAY_W'(1);
+            else if (WAYS == 2 && hum_probe && hum_hit && hum_set == SET_W'(s))
+                replace_way[s] <= hum_hit_way ^ WAY_W'(1);
         end
     end
 
-    assign mem_ld_req_valid = state == REFILL && sent_count < WORDS && !bulk_busy &&
-        !(BULK_REFILL!=0 && sent_count==0 && line_req_ready);
+    assign mem_ld_req_valid = state == REFILL && sent_count < WORDS;
     assign mem_ld_req_payload = {request_identity[GEN_WIDTH+LIDW-1 -: GEN_WIDTH],
         refill_index, (request_addr & ~(32'(LINE_BYTES-1))) + 32'(4*refill_index)};
     assign mem_st_req_valid = (state == WRITEBACK && sent_count < WORDS) || state == IO_SEND;
@@ -455,7 +442,6 @@ module dcache #(
     end
 
     always @(posedge clock) begin
-        miss_pending <= 0;
         store_pending <= 0;
         refill_hit_pending<=refill_load_fire;
         if (refill_load_fire)
@@ -463,19 +449,10 @@ module dcache #(
         if (state==PROBE && !lookup_hit) refill_valid<=0;
         if (state==REFILL && mem_ld_rsp_valid) refill_valid[response_word]<=1;
         if (accept) probe_partial<=1 && hit_store;
-        if (state == REFILL && mem_ld_rsp_valid && response_word == request_word) begin
-            // Publish the critical word immediately; the remaining words still
-            // fill the cache, even if the requesting load has been squashed.
-            if (!request_store) begin
-                miss_pending <= 1;
-                miss_response <= {request_identity, mem_ld_rsp_payload[31:0]};
-            end
-        end
         if (reset) begin
             hum_pending<=0; hum_probe<=0; hum_retry<=0; hum_held<=0;
-            state <= IDLE; bulk_busy<=0; probe_partial<=0;
+            state <= IDLE; probe_partial<=0;
             refill_valid<=0; refill_hit_pending<=0;
-            miss_pending <= 0;
             store_pending <= 0;
             sent_count <= 0;
             received_count <= 0;
@@ -543,8 +520,6 @@ module dcache #(
                     end
                 end
                 REFILL: begin
-                    if (bulk_fire) begin bulk_busy<=1; sent_count<=COUNT_W'(WORDS); end
-                    if (bulk_response) begin bulk_busy<=0; received_count<=COUNT_W'(WORDS); state<=INSTALL; end
                     if (read_fire) sent_count <= sent_count + 1'b1;
                     if (mem_ld_rsp_valid) begin
                         received_count <= received_count + 1'b1;

@@ -82,7 +82,7 @@ gtkwave build/windows/trace.vcd
 .\toolchain\oss-cad-suite\lib\python3.exe scripts/dev/report-windows.py --jobs 4
 ```
 
-顺序执行 correctness → perf → IPC profiling → synth。报告写到 `build/reports/report-windows@时间-commit_提交标题.txt`，对应 `.build/` 保存仿真器、完整日志、监视器统计和综合/时序结果。共享构建缓存默认在 `build/windows-report-cache`，可用 `--cache-dir` 更改；每份报告保存本次产物快照。记录 Git 提交、工作区状态、源码/库 SHA-256、实际工具版本和各阶段耗时；单项失败仍执行后续项，最后以非零退出码返回。成功的正确性部分输出每个用例的 cycles，性能部分输出 IPC 表。默认 correctness/IPC 限制为 100000000 cycles，perf 限制为 10000000 cycles，综合目标频率 500 MHz（周期 2 ns）；可用 `--clock-period` 覆盖。
+顺序执行 correctness → perf → synth；需要额外的 IPC 监视统计时显式使用 `--targets test perf ipc-profile synth`。报告写到 `build/reports/report-windows@时间-commit_提交标题.txt`，对应 `.build/` 保存仿真器、完整日志、监视器统计和综合/时序结果。共享构建缓存默认在 `build/windows-report-cache`，可用 `--cache-dir` 更改；每份报告保存本次产物快照。记录 Git 提交、工作区状态、源码/库 SHA-256、实际工具版本和各阶段耗时；单项失败仍执行后续项，最后以非零退出码返回。成功的正确性部分输出每个用例的 cycles，性能部分输出 IPC 表。默认 correctness/IPC 限制为 100000000 cycles，perf 限制为 10000000 cycles，综合目标频率 500 MHz（周期 2 ns）；可用 `--clock-period` 覆盖。
 
 ```powershell
 .\toolchain\oss-cad-suite\lib\python3.exe scripts/dev/report-windows.py --jobs 4 --output-dir build/windows-reports --clock-period 5 --perf-max-cycles 100000000

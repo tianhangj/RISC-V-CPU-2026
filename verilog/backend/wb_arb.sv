@@ -31,7 +31,7 @@ module wb_arb #(
     localparam integer FU_SRC_COUNT = 3+EXTRA_ALU;
     localparam integer TAG_BITS = RW;
     localparam integer RESULT_BITS = TAG_BITS + PW + 32;
-    logic [WB_WIDTH-1:0] selected_done_valid, selected_write_valid;
+    logic [WB_WIDTH-1:0] selected_done_valid;
     logic [WB_WIDTH*TAG_BITS-1:0] selected_done_tag;
     logic [WB_WIDTH*PW-1:0] selected_write_pdst;
     logic [WB_WIDTH*32-1:0] selected_write_value;
@@ -41,26 +41,13 @@ module wb_arb #(
     localparam integer CURSOR_BITS = (FU_SRC_COUNT > 1) ? $clog2(FU_SRC_COUNT) : 1;
     logic [CURSOR_BITS-1:0] cursor, next_cursor;
     integer candidate, chosen;
-    localparam integer DATA_GROUPS=(RESULT_BITS+15)/16;
     reg [WB_WIDTH*FU_SRC_COUNT-1:0] lane_choice;
-    wire [WB_WIDTH*FU_SRC_COUNT*DATA_GROUPS-1:0] data_choice;
     for (genvar lane=0; lane<WB_WIDTH; lane=lane+1) begin : g_lane_data
-        wire [RESULT_BITS-1:0] words [0:FU_SRC_COUNT-1];
         reg [RESULT_BITS-1:0] data;
-        for (genvar src=0; src<FU_SRC_COUNT; src=src+1) begin : g_source
-            localparam integer BASE=(lane*FU_SRC_COUNT+src)*DATA_GROUPS;
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(DATA_GROUPS)) distribute(
-                lane_choice[lane*FU_SRC_COUNT+src],data_choice[BASE +: DATA_GROUPS]);
-            for (genvar chunk=0; chunk<DATA_GROUPS; chunk=chunk+1) begin : g_chunk
-                localparam integer FIRST=16*chunk;
-                localparam integer BITS=(RESULT_BITS-FIRST>16)?16:RESULT_BITS-FIRST;
-                assign words[src][FIRST +: BITS]=source_payload[src][FIRST +: BITS] &
-                    {BITS{data_choice[BASE+chunk]}};
-            end
-        end
         always @* begin
             data=0;
-            for (integer src=0; src<FU_SRC_COUNT; src=src+1) data=data | words[src];
+            for (integer src=0; src<FU_SRC_COUNT; src=src+1)
+                data=data | (source_payload[src] & {RESULT_BITS{lane_choice[lane*FU_SRC_COUNT+src]}});
         end
         assign selected_done_tag[lane*TAG_BITS +: TAG_BITS]=data[RESULT_BITS-1 -: TAG_BITS];
         assign selected_write_pdst[lane*PW +: PW]=data[32 +: PW];
@@ -85,7 +72,6 @@ module wb_arb #(
         source_ready = 0;
         selected = 0;
         selected_done_valid = 0;
-        selected_write_valid = 0;
         lane_choice=0;
         next_cursor = cursor;
         for (int lane = 0; lane < WB_WIDTH; lane = lane + 1) begin
@@ -104,8 +90,6 @@ module wb_arb #(
                 lane_choice[lane*FU_SRC_COUNT+chosen]=1;
                 source_ready[chosen] = 1;
                 selected_done_valid[lane] = !discard[chosen];
-                selected_write_valid[lane] = !discard[chosen] &&
-                    (source_payload[chosen][32 +: PW] != 0);
                 next_cursor = (chosen == FU_SRC_COUNT-1) ? 0 : CURSOR_BITS'(chosen + 1);
             end
         end
@@ -118,14 +102,27 @@ module wb_arb #(
         if (reset) cursor <= 0;
         else cursor <= next_cursor;
     end
-    generate
-        begin : g_direct
-            assign done_valid = selected_done_valid;
-            assign done_tag = selected_done_tag;
-            assign write_valid = selected_write_valid;
-            assign write_pdst = selected_write_pdst;
-            assign write_value = selected_write_value;
-        end
-    endgenerate
+    // MEM/WB boundary. Every lane drains at the next edge; retirement and
+    // PRF writeback consume this same packet, so no separate commit stage exists.
+    reg [WB_WIDTH-1:0] wb_valid;
+    reg [WB_WIDTH*TAG_BITS-1:0] wb_tag;
+    reg [WB_WIDTH*PW-1:0] wb_pdst;
+    reg [WB_WIDTH*32-1:0] wb_value;
+    always @(posedge clock) begin
+        if (reset) wb_valid <= 0;
+        else wb_valid <= selected_done_valid;
+        wb_tag <= selected_done_tag;
+        wb_pdst <= selected_write_pdst;
+        wb_value <= selected_write_value;
+    end
+    for (genvar lane=0; lane<WB_WIDTH; lane=lane+1) begin : g_writeback
+        wire [RW-1:0] tag=wb_tag[lane*RW +: RW];
+        assign done_valid[lane]=!reset && wb_valid[lane] &&
+            (!squash_valid || RW'(tag-rob_head)<=RW'(squash_tag-rob_head));
+        assign write_valid[lane]=done_valid[lane] && wb_pdst[lane*PW +: PW]!=0;
+    end
+    assign done_tag=wb_tag;
+    assign write_pdst=wb_pdst;
+    assign write_value=wb_value;
 
 endmodule

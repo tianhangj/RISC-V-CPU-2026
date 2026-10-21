@@ -25,11 +25,11 @@ module issue #(
     output wire mem_store_data_valid,
     output wire [PW-1:0] mem_store_psrc,
     output wire branch_exec_valid,
-    output reg [31:0] branch_operand1, branch_operand2,
+    output wire [31:0] branch_operand1, branch_operand2,
     output wire early_wake_valid,
     output wire [PW-1:0] early_wake_pdst,
     output wire alu_exec_valid, mul_exec_valid, mem_exec_valid,
-    output wire mem_exec_preview_valid,
+    output wire mem_addr_valid,
     input wire alu_exec_ready, mul_exec_ready, mem_exec_ready,
     output wire [ALU_EXEC_BITS-1:0] alu_exec_payload,
     output wire [MUL_EXEC_BITS-1:0] mul_exec_payload,
@@ -95,8 +95,10 @@ module issue #(
     localparam integer MEM_DATA_BASE=(ISSUE_WIDTH-1)*64;
     assign alu_exec_valid=!reset && busy[0] && survives(alu_q[ALU_EXEC_BITS-1 -: RW]);
     assign mul_exec_valid=!reset && busy[1] && survives(mul_q[MUL_EXEC_BITS-1 -: RW]);
-    assign mem_exec_preview_valid=!reset && busy[2];
     assign mem_exec_valid=!reset && busy[2] && survives(mem_q[MEM_EXEC_BITS-1 -: RW]);
+    // RAM reads may be accepted on a recovery edge and drained by generation.
+    // Keep cancellation off the address-generation / cache request path.
+    assign mem_addr_valid=!reset && busy[2];
     // Cancellation removes dependent younger IQ entries at the same edge.
     // Do not route squash through this predictive wakeup's selection path.
     assign early_wake_valid=!reset && busy[0] && alu_exec_ready;
@@ -108,37 +110,26 @@ module issue #(
     assign alu_exec_payload={alu_q[ALU_EXEC_BITS-1:64],forwarded1[0],forwarded2[0]};
     assign mul_exec_payload={mul_q[MUL_EXEC_BITS-1:64],forwarded1[1],forwarded2[1]};
     assign mem_exec_payload={mem_q[MEM_EXEC_BITS-1:96],forwarded1[2],mem_q[63:32],forwarded2[2]};
-    // Bound each completion-match net to a few operand chunks. Branch and
-    // arithmetic forwarding retain separate buffers even when their match
-    // predicates are identical.
-    wire [3*FORWARD_WIDTH*4-1:0] current1_select, current2_select;
-    wire [3*FORWARD_WIDTH*4-1:0] previous1_select, previous2_select;
+    // Branch resolution uses the same operands as the main ALU, while its
+    // valid/announcement state remains independent of result backpressure.
+    assign branch_operand1=forwarded1[0];
+    assign branch_operand2=forwarded2[0];
+    wire [3*FORWARD_WIDTH*2-1:0] current1_select, current2_select;
+    wire [3*FORWARD_WIDTH*2-1:0] previous1_select, previous2_select;
     for (genvar lane=0; lane<3; lane=lane+1) begin : g_forward_lane
         for (genvar w=0; w<FORWARD_WIDTH; w=w+1) begin : g_completion
-            localparam integer BASE=(lane*FORWARD_WIDTH+w)*4;
+            localparam integer BASE=(lane*FORWARD_WIDTH+w)*2;
             wire current1=forward_valid[w] && src1[lane]!=0 && src1[lane]==forward_pdst[w*PW +: PW];
             wire current2=forward_valid[w] && src2[lane]!=0 && src2[lane]==forward_pdst[w*PW +: PW];
             wire previous1=last_valid[w] && src1[lane]!=0 && src1[lane]==last_pdst[w*PW +: PW];
             wire previous2=last_valid[w] && src2[lane]!=0 && src2[lane]==last_pdst[w*PW +: PW];
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4)) current_src1(current1,current1_select[BASE +: 4]);
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4)) current_src2(current2,current2_select[BASE +: 4]);
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4)) previous_src1(previous1,previous1_select[BASE +: 4]);
-            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(4)) previous_src2(previous2,previous2_select[BASE +: 4]);
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2)) current_src1(current1,current1_select[BASE +: 2]);
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2)) current_src2(current2,current2_select[BASE +: 2]);
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2)) previous_src1(previous1,previous1_select[BASE +: 2]);
+            (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(2)) previous_src2(previous2,previous2_select[BASE +: 2]);
         end
     end
     always @* begin
-        branch_operand1=operand1[0]; branch_operand2=operand2[0];
-        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
-            for (integer half=0; half<2; half=half+1) begin
-                if (previous1_select[w*4+2+half]) branch_operand1[half*16 +: 16]=last_value[w*32+half*16 +: 16];
-                if (previous2_select[w*4+2+half]) branch_operand2[half*16 +: 16]=last_value[w*32+half*16 +: 16];
-            end
-        for (integer w=0; w<FORWARD_WIDTH; w=w+1)
-            for (integer half=0; half<2; half=half+1)
-                if ((w==0 || w==3)) begin
-                    if (current1_select[w*4+2+half]) branch_operand1[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
-                    if (current2_select[w*4+2+half]) branch_operand2[half*16 +: 16]=forward_value[w*32+half*16 +: 16];
-                end
         mem_data_forward=0;
         for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 if (last_valid[w] && src2[2]==last_pdst[w*PW +: PW]) mem_data_forward=1;
@@ -148,18 +139,18 @@ module issue #(
             forwarded1[lane]=operand1[lane]; forwarded2[lane]=operand2[lane];
             for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 for (integer half=0; half<2; half=half+1) begin
-                    if (previous1_select[(lane*FORWARD_WIDTH+w)*4+half])
+                    if (previous1_select[(lane*FORWARD_WIDTH+w)*2+half])
                         forwarded1[lane][half*16 +: 16]=last_value[w*32+half*16 +: 16];
-                    if (previous2_select[(lane*FORWARD_WIDTH+w)*4+half])
+                    if (previous2_select[(lane*FORWARD_WIDTH+w)*2+half])
                         forwarded2[lane][half*16 +: 16]=last_value[w*32+half*16 +: 16];
                 end
             for (integer w=0; w<FORWARD_WIDTH; w=w+1)
                 for (integer half=0; half<2; half=half+1) begin
                     if ((w==0 || w==3) &&
-                        current1_select[(lane*FORWARD_WIDTH+w)*4+half])
+                        current1_select[(lane*FORWARD_WIDTH+w)*2+half])
                         forwarded1[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                     if ((lane==2 || (w==0 || w==3)) &&
-                        current2_select[(lane*FORWARD_WIDTH+w)*4+half])
+                        current2_select[(lane*FORWARD_WIDTH+w)*2+half])
                         forwarded2[lane][half*16 +: 16]=forward_value[w*32+half*16 +: 16];
                 end
         end

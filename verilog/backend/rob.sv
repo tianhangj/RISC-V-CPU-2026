@@ -35,13 +35,12 @@ module rob #(
     wire [COMMIT_WIDTH*RW-1:0] metadata_addr;
     wire [COMMIT_WIDTH*ROB_ALLOC_BITS-1:0] metadata_data;
     logic [ROB_DEPTH-1:0] completed;
+    wire [COMMIT_WIDTH-1:0] retire_completed;
     reg head_store_started;
     logic [RW-1:0] head_q, tail_q;
     logic [ROB_CW-1:0] count_q;
     logic [ROB_CW-1:0] retire_count, keep_count;
     logic stop_retire;
-    logic head_completed;
-    integer slot;
     function automatic [RW-1:0] age(input [RW-1:0] tag, input [RW-1:0] head);
         age = tag - head;
     endfunction
@@ -77,8 +76,15 @@ module rob #(
         end
     end
     for (genvar lane=0; lane<COMMIT_WIDTH; lane=lane+1) begin : g_retire_metadata
-        assign metadata_addr[lane*RW +: RW]=head_q+RW'(lane);
+        wire [RW-1:0] retire_tag=head_q+RW'(lane);
+        assign metadata_addr[lane*RW +: RW]=retire_tag;
         assign retire_alloc[lane]=metadata_data[lane*ROB_ALLOC_BITS +: ROB_ALLOC_BITS];
+        wire [WB_WIDTH-1:0] completing;
+        for (genvar w=0; w<WB_WIDTH; w=w+1) begin : g_complete
+            assign completing[w]=done_valid[w] &&
+                done_tag[w*RW +: RW]==retire_tag;
+        end
+        assign retire_completed[lane]=completed[retire_tag] || (|completing);
     end
 
     always_comb begin
@@ -86,24 +92,19 @@ module rob #(
         if (squash_valid) keep_count = {1'b0, (squash_tag - head_q)} + 1'b1;
         st_start_valid = 0;
         st_start_id = retire_alloc[0][SIDW-1:0];
-        head_completed = completed[head_q];
-        for (int w = 0; w < WB_WIDTH; w = w + 1)
-            if (done_valid[w] && done_tag[w*TAG_BITS +: TAG_BITS] == head_q)
-                head_completed = 1;
         if (count_q != 0 && retire_alloc[0][SIDW +: 2] == 2'd3 &&
-            head_completed && !head_store_started) st_start_valid = 1;
+            retire_completed[0] && !head_store_started) st_start_valid = 1;
         retire_count = 0;
         stop_retire = 0;
         reg_commit_valid = 0;
         reg_commit_payload = 0;
         for (int lane = 0; lane < COMMIT_WIDTH; lane = lane + 1) begin
-            slot = (head_q + lane) % ROB_DEPTH;
             if (!stop_retire && lane < keep_count) begin
                 if (retire_alloc[lane][SIDW +: 2] == 2'd3) begin
                     if (lane == 0 && (head_store_started || st_start_valid) && st_done_valid)
                         retire_count = retire_count + 1'b1;
                     else stop_retire = 1;
-                end else if (completed[slot]) begin
+                end else if (retire_completed[lane]) begin
                     retire_count = retire_count + 1'b1;
                     if (retire_alloc[lane][ROB_ALLOC_BITS-1 -: PW] != 0) begin
                         reg_commit_valid[lane] = 1;

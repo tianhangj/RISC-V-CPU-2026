@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run correctness, performance, IPC profiling and synthesis on native Windows."""
+"""Run correctness, performance and synthesis; optionally collect IPC profiling."""
 import argparse
 import hashlib
 import json
@@ -161,7 +161,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="clean rebuild and rerun synthesis")
     parser.add_argument("--reuse-results", action="store_true", help="reuse verified identical correctness/perf results")
     parser.add_argument("--targets", nargs="+", choices=("test", "perf", "ipc-profile", "synth"),
-                        default=("test", "perf", "ipc-profile", "synth"))
+                        default=("test", "perf", "synth"))
     parser.add_argument("--filelist", type=Path, default=ROOT / "verilog/filelist.f")
     parser.add_argument("--testcases", type=Path, default=ROOT / "testcases")
     parser.add_argument("--test-max-cycles", type=int, default=100_000_000)

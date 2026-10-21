@@ -15,7 +15,6 @@ frontend/branch_predictor.sv
 frontend/fetch.sv
 frontend/icache.sv
 memory/dcache.sv
-memory/data_prefetch.sv
 memory/axi_bridge.sv
 backend/iq_core.sv
 backend/iq_alu.sv
