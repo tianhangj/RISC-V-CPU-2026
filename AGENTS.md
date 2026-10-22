@@ -3,3 +3,4 @@
 - 语言要求使用system verilog 2005
 - 需要能够确保代码可以仿真和综合
 - 运行环境由 docker 提供；如果在 Windows 上，则参考 `toolchain/USAGE.md` 进行运行和测试。
+- 运行完单元测试不保留在仓库中
