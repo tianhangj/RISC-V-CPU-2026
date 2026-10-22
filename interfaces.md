@@ -240,6 +240,8 @@ fetch 在 reset 或重定向边沿清空槽状态、指针、计数和输出保�
 
 D-cache 缺失以请求字为起点，按行内下标回绕发送整行读请求；请求字从 AXI 返回的当周期直接输出原 Load 响应，其余字继续填充；响应优先于 hit-under-miss 完成，后者在冲突时保持。默认数据缓存容量为 16KiB，双路组相联，每行 128 字节，容量和路数独立配置。双路时采用 LRU，普通 Load/Store 命中、miss 期间其他缓存行命中以及 refill 安装均更新下一替换路；单路和四路保持轮转替换。外部读事务由取指填充或数据缺失触发，数据通道不访问相邻缓存行。
 
+数据字 bank 的地址选择独立于当周期请求接受信号：写入字、部分 probe 后的 victim 重读和 MMIO 扫描使用保存地址，其余 bank 预选当前 lookup 地址；原有读写使能决定是否访问 SRAM。Store 与下一次 probe 重叠时，写入字访问旧请求的 set，其他被读取的字访问新请求的 set。
+
 RAM 地址范围为 `0x00000000..0x0fffffff`，按 little-endian 访问。非 RAM Load 返回零，不发外部读；非 RAM Store 进入 I/O 路径，D-cache 先排空脏数据，再发送写事务。I/O drain 的每行最后一字被桥接收后即清除 dirty 并继续扫描下一行；`flush_outstanding` 跨行统计已接收但未应答的回写。只有所有脏行发送完成且 outstanding 归零，才进入 I/O 发送。普通脏替换仍等待该行所有应答后 refill。官方模拟器使用 `SW 0x80000000` 作为程序结果/退出写，结果完成需经过外部写响应；不加入 CSR、中断、异常或 MMU 接口。
 
 顶层外部端口保持原协议，方向相对 CPU：
@@ -313,7 +315,9 @@ make branch-accuracy APPIMAGE= BP_WB_WIDTH=1 BP_COMMIT_WIDTH=2 BP_ENABLE=0
 
 `make` / `make code` 保留 OJ 的 `./code` 入口。综合面积与时序报告由官方 synth/timing 工具产生；Windows 的构建、正确性、性能和综合入口见 `toolchain/USAGE.md`，可分别调用并复用与当前源码一致的仿真器。
 
-开发加速入口为 `scripts/dev/fast.py build|test|perf|synth`，Make 对应 `fast-build/fast-test/fast-perf/fast-synth`。Windows 的 `windows.py` 和三个 PowerShell 快捷入口调用同一开发实现。构建继续使用官方 `scripts/sim.cpp`、SRAM 模型、波形和断言，语言为 `1800-2005`；C++ 热路径和运行库默认 `-O3`，`--optimization size` 选择 `-Os`。`--jobs` 控制构建并行数，`--test-jobs` 控制独立用例进程数，结果按官方用例顺序输出。
+开发加速入口为 `scripts/dev/fast.py build|test|perf|synth`，Make 对应 `fast-build/fast-test/fast-perf/fast-synth`。Windows 的 `windows.py` 和三个 PowerShell 快捷入口调用同一开发实现。构建使用官方 `scripts/sim.cpp`、SRAM 模型和断言，语言为 `1800-2005`；C++ 热路径和运行库默认 `-O3`，`--optimization size` 选择 `-Os`。`--jobs` 控制构建并行数，`--test-jobs` 控制独立用例进程数，结果按官方用例顺序输出。`make fast-test/fast-perf` 的默认上限为 100000000 cycles，可用 `MAX_CYCLES` 覆盖。
+
+开发构建默认不编译波形模型；`simulation_driver.py` 在输出目录生成 `sim_no_trace.cpp`，仅移除官方驱动的波形设置、dump 和 close，保留存储器、AXI 握手、复位、退出与 cycles 流程。适配器逐项匹配官方波形代码，遇到不匹配即报错。`--trace`（Make 为 `TRACE=1`，Windows 同为 `--trace`）使用未改写的官方驱动并编译完整 VCD 支持；无波形仿真器收到 WAVE 参数时明确要求重新构建。波形模式纳入缓存身份和 `sim.json`，切换模式重建对象目录。Verilator 的 `-V` 仅用于定位并校验运行库，不自动导出 `VERILATOR_ROOT`，兼容 Docker 中可执行文件与头文件分目录安装。
 
 普通开发 `build/test/perf` 也接受可重复的 `--parameter NAME=VALUE`，与监视构建共用顶层名称校验和参数缓存身份；不能与 `--sim` 同用。Windows 双宽入口示例：
 

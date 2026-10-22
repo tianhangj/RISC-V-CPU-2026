@@ -15,6 +15,7 @@ module dcache_lru_tb;
     reg [31:0] memory [0:63];
     reg [31:0] response_data [0:1];
     reg held_hit_seen=0;
+    reg partial_victim_seen=0;
     integer responses [0:1];
     integer reads=0, writes=0;
     dcache #(.SIZE_BYTES(64),.WAYS(2),.LINE_BYTES(16),.LQ_DEPTH(2),.GEN_WIDTH(2)) dut (
@@ -43,6 +44,20 @@ module dcache_lru_tb;
         end
         if (!reset && dut.hum_probe && dut.hum_hit && dut.primary_response)
             held_hit_seen<=1;
+        if (!reset && dut.state==1 && dut.probe_partial)
+            partial_victim_seen<=1;
+    end
+    // The optimized address may differ only for disabled SRAMs. Check the
+    // previous selector's address at every actual read/write edge.
+    for (genvar way=0; way<2; way=way+1) begin : g_check_way
+        for (genvar word=0; word<4; word=word+1) begin : g_check_word
+            always @(posedge clock)
+                if (!reset && dut.g_way[way].g_data_word[word].bank_en &&
+                    dut.g_way[way].g_data_word[word].bank_addr !==
+                    (dut.g_way[way].g_data_word[word].g_overlap.reads_bank ?
+                        dut.lookup_set : dut.ram_addr))
+                    $fatal(1,"enabled bank address changed");
+        end
     end
     task tick;
         begin @(posedge clock); #1; end
@@ -71,6 +86,22 @@ module dcache_lru_tb;
             while (!st_req_ready) @(negedge clock);
             tick; st_req_valid=0;
             wait(st_rsp_valid); tick;
+        end
+    endtask
+    task store_then_load(input [31:0] addr, expected);
+        integer previous;
+        begin
+            previous=responses[0];
+            @(negedge clock); st_req_valid=1;
+            st_req_payload={32'h00,32'h12345678,4'hf};
+            while (!st_req_ready) @(negedge clock);
+            tick; st_req_valid=0;
+            ld_req_valid=1; ld_req_payload={2'd1,1'b0,addr}; #1;
+            if (!ld_req_ready) $fatal(1,"different-word Store/probe overlap stalled");
+            tick; ld_req_valid=0;
+            wait(responses[0]>previous); #1;
+            if (response_data[0]!=expected) $fatal(1,"overlapping probe data");
+            wait(dut.state==0); #1;
         end
     endtask
     integer previous0, previous1;
@@ -106,7 +137,18 @@ module dcache_lru_tb;
         if (writes!=4) $fatal(1,"hit-under-miss did not update LRU");
         load_word(32'h00,32'hc0010000,28);
         load_word(32'h40,32'hc001ab40,32);
-        $display("PASS dcache_lru: Load/Store recency, held hit-under-miss, dirty eviction/refill");
+        // Both ways of set 1 are dirty. A Store to set 0 overlaps a probe
+        // of set 1, first a hit and then a miss requiring a full victim reread.
+        store_word(32'h10,32'h11223344,4'hf);
+        load_word(32'h30,32'hc0010030,reads+4);
+        store_word(32'h30,32'h55667788,4'hf);
+        load_word(32'h00,32'hc0010000,reads);
+        store_then_load(32'h14,32'hc0010014);
+        store_then_load(32'h54,32'hc0010054);
+        if (!partial_victim_seen || memory[12]!=32'h55667788 ||
+            memory[13]!=32'hc0010034 || memory[14]!=32'hc0010038 || memory[15]!=32'hc001003c)
+            $fatal(1,"partial probe victim reread/writeback");
+        $display("PASS dcache_lru: recency, hit-under-miss, dirty eviction, overlapping cross-set probes/victim reread");
         $finish;
     end
     initial begin #20000; $fatal(1,"timeout"); end

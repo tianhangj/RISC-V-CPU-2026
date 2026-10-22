@@ -15,12 +15,13 @@ sys.path.insert(0, str(SCRIPTS))
 from build import read_sources
 from fakeram import with_ram_source, RAM_SOURCE
 from flow_cache import identities, locked, read_json, rtl_dependencies, save_record, valid_record, write_json
+from simulation_driver import driver_source
 
 DEFAULT_JOBS = min(8, os.cpu_count() or 1)
 
 
 def build_simulator(filelist, output, jobs, tools, overrides=None, monitored=False,
-                    optimization="-O3", force=False, extra_inputs=()):
+                    optimization="-O3", force=False, extra_inputs=(), trace=False):
     """Reuse exact binaries; regenerate changed RTL and let Make reuse C++ objects."""
     from instrumentation import MONITORS
     if jobs < 1 or optimization not in ("-Os", "-O3"):
@@ -38,16 +39,27 @@ def build_simulator(filelist, output, jobs, tools, overrides=None, monitored=Fal
         native = Path(tool_paths["verilator"]).with_name(suffix)
         if native.is_file():
             tool_inputs.append(native)
-    runtime = Path(os.environ.get("VERILATOR_ROOT", "")) / "include"
+    runtime_root = os.environ.get("VERILATOR_ROOT")
+    if not runtime_root:
+        version = subprocess.check_output([tool_paths["verilator"], "-V"], text=True)
+        match = re.search(r"(?m)^\s*VERILATOR_ROOT\s*=\s*(\S+)", version)
+        if not match:
+            raise ValueError("cannot locate Verilator runtime headers from -V")
+        runtime_root = match[1]
+    # Debian installs the wrapper/binary in /usr/bin and headers in /usr/share.
+    # Discover headers for hashing without exporting VERILATOR_ROOT: exporting
+    # it makes the wrapper look for a binary under the header directory.
+    runtime = Path(runtime_root) / "include"
     runtime_inputs = sorted(p for p in runtime.rglob("*") if p.is_file() and p.suffix in (".h", ".cpp", ".mk"))
     configuration = {"schema": 1, "root": ROOT.as_posix(), "output": output.as_posix(),
                      "tools": identities(tool_inputs), "tool_paths": tool_paths,
                      "runtime": identities(runtime_inputs), "python": sys.version,
                      "overrides": overrides, "monitored": monitored,
-                     "optimization": optimization, "language": "1800-2005", "trace": True, "assert": True}
+                     "optimization": optimization, "language": "1800-2005", "trace": trace, "assert": True}
     inputs = rtl_dependencies(sources) + [SCRIPTS / "sim.cpp", Path(filelist).resolve(),
               SCRIPTS / "build.py", SCRIPTS / "fakeram.py", Path(__file__),
-              Path(__file__).with_name("flow_cache.py"), *extra_inputs]
+              Path(__file__).with_name("flow_cache.py"),
+              Path(__file__).with_name("simulation_driver.py"), *extra_inputs]
     hashes = identities(inputs)
     identity = {"configuration": configuration, "inputs": hashes}
     binary = output / ("sim.exe" if os.name == "nt" else "sim")
@@ -69,12 +81,13 @@ def build_simulator(filelist, output, jobs, tools, overrides=None, monitored=Fal
         binary.unlink(missing_ok=True)
         manifest.unlink(missing_ok=True)
         record.unlink(missing_ok=True)
-        command = [tool_paths["verilator"], "--cc", "--exe", "--trace", "--assert",
+        driver = driver_source(SCRIPTS / "sim.cpp", output, trace)
+        command = [tool_paths["verilator"], "--cc", "--exe", *(["--trace"] if trace else []), "--assert",
                    "--language", "1800-2005", "-Wno-fatal", "--top-module", "student_top",
                    "--Mdir", objects.as_posix(), "-o", binary.as_posix(),
                    "-CFLAGS", "-std=c++17 -DVL_TIME_CONTEXT",
                    *[f"-G{k}={v}" for k, v in sorted(overrides.items())],
-                   *[p.as_posix() for p in sources], (SCRIPTS / "sim.cpp").as_posix()]
+                   *[p.as_posix() for p in sources], driver.as_posix()]
         make = [tool_paths["make"], "-C", objects.as_posix(), "-f", "Vstudent_top.mk", f"-j{jobs}",
                 f"CXX={tool_paths['cxx']}", f"LINK={tool_paths['cxx']}", f"AR={tool_paths['ar']}",
                 f"PYTHON3={Path(sys.executable).as_posix()}",
@@ -94,6 +107,7 @@ def build_simulator(filelist, output, jobs, tools, overrides=None, monitored=Fal
                            for p, h in hashes.items()}
         write_json(manifest, {"overrides": overrides, "source_sha256": relative_hashes,
                              "language": "1800-2005", "monitored": monitored,
+                             "trace": trace,
                              "optimization": optimization, "build_seconds": time.perf_counter() - start})
         save_record(record, identity, [binary, manifest])
     return binary, relative_hashes

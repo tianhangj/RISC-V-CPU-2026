@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "build/fast")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
     parser.add_argument("--optimization", choices=("size", "speed"), default="speed")
+    parser.add_argument("--trace", action="store_true", help="compile waveform support (slower build)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--parameter", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--appimage", default=str(ROOT / "cpu2026-tools-x86_64.AppImage"))
@@ -56,17 +57,10 @@ def main():
         verilator = executable(args.verilator) if args.verilator else (packaged_tool("verilator") or executable("verilator"))
         tools = {"verilator": verilator, "make": executable(args.make),
                  "cxx": executable(args.cxx), "ar": executable(args.ar)}
-        # Locate runtime headers in system installations as well as AppImages.
-        if not os.environ.get("VERILATOR_ROOT"):
-            version = subprocess.check_output([verilator, "-V"], text=True)
-            import re
-            root = re.search(r"(?m)^\s*VERILATOR_ROOT\s*=\s*(\S+)", version)
-            if root:
-                os.environ["VERILATOR_ROOT"] = root[1]
         simulator, _ = build_simulator(args.filelist, args.out, args.jobs, tools,
                                       overrides=overrides,
                                       optimization="-O3" if args.optimization == "speed" else "-Os",
-                                      force=args.force)
+                                      force=args.force, trace=args.trace)
     if target.target == "build":
         print(simulator)
         return 0

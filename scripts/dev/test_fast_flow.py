@@ -11,6 +11,7 @@ from unittest.mock import patch
 import fast_flow
 from flow_cache import identities, rtl_dependencies, save_record, valid_record
 from parallel_cases import run_cases
+from simulation_driver import without_trace
 
 
 class CacheSafety(unittest.TestCase):
@@ -78,6 +79,52 @@ class CacheSafety(unittest.TestCase):
                     fast_flow.build_simulator(filelist, output, 1, tools)
             self.assertFalse(first.exists())
             self.assertFalse((output / "sim.json").exists())
+
+    def test_runtime_discovery_does_not_redirect_wrapper_and_trace_invalidates_cache(self):
+        source, filelist = self.root / "top.sv", self.root / "filelist.f"
+        source.write_text("module student_top; endmodule")
+        filelist.write_text("top.sv\n")
+        tools = {}
+        for name in ("verilator", "make", "cxx", "ar"):
+            path = self.root / name
+            path.write_bytes(name.encode())
+            tools[name] = str(path)
+        output = self.root / "build"
+        invocations = []
+
+        def run(command, **kwargs):
+            self.assertNotIn("VERILATOR_ROOT", fast_flow.os.environ)
+            invocations.append(command)
+            if command[0] == tools["make"]:
+                (output / ("sim.exe" if fast_flow.os.name == "nt" else "sim")).write_bytes(b"binary")
+            return subprocess.CompletedProcess(command, 0)
+
+        environment = dict(fast_flow.os.environ)
+        environment.pop("VERILATOR_ROOT", None)
+        with patch.dict(fast_flow.os.environ, environment, clear=True), \
+             patch.object(fast_flow.subprocess, "check_output", return_value="  VERILATOR_ROOT = /usr/share/verilator\n"), \
+             patch.object(fast_flow.subprocess, "run", side_effect=run), redirect_stdout(io.StringIO()):
+            fast_flow.build_simulator(filelist, output, 1, tools)
+            self.assertNotIn("--trace", invocations[0])
+            self.assertTrue((output / "sim_no_trace.cpp").is_file())
+            fast_flow.build_simulator(filelist, output, 2, tools)
+            self.assertEqual(len(invocations), 2)
+            fast_flow.build_simulator(filelist, output, 1, tools, trace=True)
+            self.assertIn("--trace", invocations[2])
+            self.assertEqual(len(invocations), 4)
+            self.assertTrue(json.loads((output / "sim.json").read_text())["trace"])
+            fast_flow.build_simulator(filelist, output, 1, tools, trace=False)
+            self.assertEqual(len(invocations), 6)
+            self.assertFalse(json.loads((output / "sim.json").read_text())["trace"])
+
+    def test_trace_adapter_refuses_changed_course_driver(self):
+        driver = (fast_flow.SCRIPTS / "sim.cpp").read_text()
+        plain = without_trace(driver)
+        self.assertNotIn("top.trace", plain)
+        self.assertNotIn("trace.dump", plain)
+        self.assertIn("rebuild with --trace", plain)
+        with self.assertRaises(ValueError):
+            without_trace(driver.replace("top.trace(&trace, 99);", "top.trace(&trace, 100);"))
 
     def workload(self, name):
         case = self.root / "cases" / name

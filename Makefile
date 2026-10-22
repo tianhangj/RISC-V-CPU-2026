@@ -27,7 +27,8 @@ PROGRAM ?= program.bin
 EXPECTED ?=
 Case ?=
 JOBS ?= 1
-MAX_CYCLES ?= 1000000
+# Long correctness workloads need more than one million cycles in the dev flow.
+MAX_CYCLES ?= $(if $(filter fast-test fast-perf,$(MAKECMDGOALS)),100000000,1000000)
 BP_MAX_CYCLES ?= 100000000
 BP_WB_WIDTH ?= 2
 BP_COMMIT_WIDTH ?= 2
@@ -42,6 +43,7 @@ FAST_BUILD ?= $(BUILD)/fast
 TEST_JOBS ?= 4
 REUSE_RESULTS ?= 0
 FORCE ?= 0
+TRACE ?= 0
 WAVE ?=
 LOG ?=
 ifneq ($(strip $(BLACKBOXES)),)
@@ -74,6 +76,7 @@ help:
 	@echo '  Outputs: SYNTH_OUT/MODE/ (SYNTH_OUT defaults to build/synth)'
 	@echo 'make clean  (removes BUILD, SYNTH_OUT and code)'
 	@echo 'make fast-test / fast-perf [JOBS=8 TEST_JOBS=4 REUSE_RESULTS=1 FORCE=1]'
+	@echo 'make fast-build TRACE=1: include waveform support (development builds default to no trace)'
 	@echo 'make fast-synth: reuse verified synthesis results; FORCE=1 reruns all phases'
 	@echo 'make / make code: compile RTL and produce ./code for OJ'
 
@@ -133,6 +136,7 @@ fast-build fast-test fast-perf:
 		--appimage "$(APPIMAGE)" --cxx "$(CXX)" --ar "$(AR)" --make "$(BUILD_MAKE)" \
 		$(if $(VERILATOR),--verilator "$(VERILATOR)",) \
 		--testcases "$(TESTCASES)" --max-cycles $(MAX_CYCLES) --latency $(LATENCY) --test-jobs $(TEST_JOBS) \
+		$(if $(filter 1,$(TRACE)),--trace,) \
 		$(if $(SIM),--sim "$(SIM)",) $(if $(Case),--case "$(Case)",) \
 		$(if $(filter 1,$(REUSE_RESULTS)),--reuse-results,) $(if $(filter 1,$(FORCE)),--force,)
 

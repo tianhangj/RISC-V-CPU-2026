@@ -307,6 +307,12 @@ module dcache #(
     localparam integer BANK_CONTROL_BITS=3+WAY_W;
     wire [WAYS*WORDS*BANK_CONTROL_BITS-1:0] bank_control;
     wire [WAYS*WORDS*SET_W-1:0] bank_address, bank_read_address;
+    wire [WAYS*WORDS-1:0] bank_saved_read;
+    // Only victim rereads and the MMIO scan read a saved address. Ordinary
+    // probes can select lookup_set before their late acceptance/enable arrives.
+    (* keep_hierarchy, keep *) signal_fanout #(.BRANCHES(WAYS*WORDS))
+        distribute_bank_saved_read(state==FLUSH_SCAN ||
+            (state==PROBE && !lookup_hit && probe_partial),bank_saved_read);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(SET_W), .BRANCHES(WAYS*WORDS))
         distribute_bank_read_address(lookup_set,bank_read_address);
     (* keep_hierarchy, keep *) signal_fanout #(.WIDTH(BANK_CONTROL_BITS), .BRANCHES(WAYS*WORDS))
@@ -357,8 +363,8 @@ module dcache #(
                 .data(local_en), .enable(reads_bank ||
                     (local_way==WAY_W'(way) && (writes_word || (!local_we && !local_read)))),
                 .masked(bank_en));
-            assign bank_addr=reads_bank ? bank_read_address[BANK*SET_W +: SET_W] :
-                bank_address[BANK*SET_W +: SET_W];
+            assign bank_addr=(writes_word || bank_saved_read[BANK]) ?
+                bank_address[BANK*SET_W +: SET_W] : bank_read_address[BANK*SET_W +: SET_W];
         end
         sram_fakeram #(.DEPTH(SETS), .WIDTH(32), .WRITE_GRANULARITY(8)) data_ram (
             .clk(clock), .en(bank_en), .we(bank_we), .wmask(ram_mask[word*4 +: 4]),

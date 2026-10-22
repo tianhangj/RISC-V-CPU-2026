@@ -63,14 +63,14 @@ def native_output(command, **kwargs):
 
 
 def build_simulator(filelist, output, jobs, overrides=None, monitored=False,
-                    optimization="-O3", force=False):
+                    optimization="-O3", force=False, trace=False):
     from fast_flow import build_simulator as cached_build
     tools = {"verilator": tool("oss-cad-suite/bin/verilator_bin.exe"),
              "make": tool("msys64/usr/bin/make.exe"),
              "cxx": tool("msys64/mingw64/bin/g++.exe"),
              "ar": tool("msys64/mingw64/bin/ar.exe")}
     return cached_build(filelist, output, jobs, tools, overrides, monitored,
-                        optimization, force, extra_inputs=[Path(__file__)])
+                        optimization, force, extra_inputs=[Path(__file__)], trace=trace)
 
 
 def synthesize(arguments):
@@ -157,6 +157,7 @@ def main():
     from fast_flow import DEFAULT_JOBS
     build_parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
     build_parser.add_argument("--optimization", choices=("size", "speed"), default="speed")
+    build_parser.add_argument("--trace", action="store_true", help="compile waveform support (slower build)")
     build_parser.add_argument("--force", action="store_true", help="force a clean simulator rebuild")
     build_parser.add_argument("--parameter", action="append", default=[], metavar="NAME=VALUE")
     if args.target != "build":
@@ -182,7 +183,7 @@ def main():
         simulator, _ = build_simulator(options.filelist, options.out, options.jobs,
                                       overrides=overrides,
                                       optimization="-O3" if options.optimization == "speed" else "-Os",
-                                      force=options.force)
+                                      force=options.force, trace=options.trace)
     if args.target == "build":
         print(simulator)
         return 0
