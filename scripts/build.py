@@ -68,7 +68,7 @@ def build_simulator(sources, out, args):
     }.items())
     subprocess.run([
         verilator, "--cc", "--exe", "--build", "--trace", "--assert",
-        "-Wall", "-Wno-fatal", "-Wno-DECLFILENAME", "-Wno-PINCONNECTEMPTY", "--top-module", "student_top",
+        "-Wall", "-Wno-fatal", "-Wno-DECLFILENAME", "-Wno-PINCONNECTEMPTY", "-Wno-GENUNNAMED", "--top-module", "student_top",
         "--Mdir", str(objects), "-o", str(binary), "-j", str(args.jobs),
         "-MAKEFLAGS", make_flags,
         "-CFLAGS", "-std=c++17",
